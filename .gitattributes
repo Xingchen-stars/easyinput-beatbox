@@ -1,0 +1,8 @@
+# Preserve the byte-for-byte firmware source used for the fixed release.
+# This avoids Windows core.autocrlf changing its published source fingerprints.
+firmware/** -text
+artifacts/release-v1.0.0-browser-hmac/** -text
+*.bin binary
+*.raw binary
+*.zip binary
+*.bundle binary

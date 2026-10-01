@@ -10,8 +10,5 @@
     "desktop": "node desktop/dev-runner.mjs",
     "desktop:dev": "pnpm --filter easyinput-beatbox-desktop dev",
     "desktop:start": "pnpm build && pnpm --filter easyinput-beatbox-desktop start"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": ["electron"]
   }
 }

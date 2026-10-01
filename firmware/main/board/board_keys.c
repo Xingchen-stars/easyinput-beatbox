@@ -17,15 +17,37 @@ static const int s_key_gpios[8] = {
 static pcnt_unit_handle_t s_encoder_unit;
 static int s_encoder_consumed_count;
 
-/* Debounced encoder press / S8 used for transport. */
-static bool s_press_raw = false;
-static bool s_press_stable = false;
-static int64_t s_press_change_us = 0;
-static bool s_press_edge = false;
+typedef struct {
+    bool raw;
+    bool stable;
+    int64_t change_us;
+} debounced_button_t;
+
+static debounced_button_t s_encoder_button;
+static debounced_button_t s_s7_button;
+static debounced_button_t s_s8_button;
 
 #define PRESS_DEBOUNCE_US 25000
 
 #define ENCODER_COUNTS_PER_DETENT 4
+
+static void debounce_button(debounced_button_t *button, bool raw, int64_t now,
+                            bool *pressed, bool *released)
+{
+    *pressed = false;
+    *released = false;
+    if (raw != button->raw) {
+        button->raw = raw;
+        button->change_us = now;
+        return;
+    }
+    if ((now - button->change_us) < PRESS_DEBOUNCE_US || raw == button->stable) {
+        return;
+    }
+    button->stable = raw;
+    *pressed = raw;
+    *released = !raw;
+}
 
 static esp_err_t encoder_pcnt_init(void)
 {
@@ -105,10 +127,10 @@ esp_err_t board_keys_init(void)
     ESP_RETURN_ON_ERROR(gpio_config(&cfg), TAG, "gpio_config failed");
 
     ESP_RETURN_ON_ERROR(encoder_pcnt_init(), TAG, "encoder PCNT init");
-    s_press_raw = false;
-    s_press_stable = false;
-    s_press_change_us = esp_timer_get_time();
-    s_press_edge = false;
+    const int64_t now = esp_timer_get_time();
+    s_encoder_button = (debounced_button_t){.change_us = now};
+    s_s7_button = (debounced_button_t){.change_us = now};
+    s_s8_button = (debounced_button_t){.change_us = now};
     ESP_LOGI(TAG, "keys + encoder ready");
     return ESP_OK;
 }
@@ -123,22 +145,14 @@ esp_err_t board_keys_poll(board_input_snapshot_t *out)
         out->s[i] = gpio_get_level(s_key_gpios[i]) == 0;
     }
 
-    /* Transport buttons: encoder press OR S8. */
-    const bool raw = (gpio_get_level(BOARD_GPIO_ENC_PRESS) == 0) || out->s[7];
     const int64_t now = esp_timer_get_time();
-    s_press_edge = false;
-
-    if (raw != s_press_raw) {
-        s_press_raw = raw;
-        s_press_change_us = now;
-    } else if ((now - s_press_change_us) >= PRESS_DEBOUNCE_US && raw != s_press_stable) {
-        s_press_stable = raw;
-        if (s_press_stable) {
-            s_press_edge = true; /* rising edge after debounce = one clean press */
-        }
-    }
-
-    out->enc_press = s_press_edge;
+    debounce_button(&s_encoder_button, gpio_get_level(BOARD_GPIO_ENC_PRESS) == 0, now,
+                    &out->enc_pressed, &out->enc_released);
+    out->enc_down = s_encoder_button.stable;
+    debounce_button(&s_s7_button, out->s[6], now, &out->s7_pressed, &out->s7_released);
+    out->s[6] = s_s7_button.stable;
+    bool s8_released = false;
+    debounce_button(&s_s8_button, out->s[7], now, &out->s8_pressed, &s8_released);
 
     out->enc_delta = 0;
 
@@ -146,7 +160,7 @@ esp_err_t board_keys_poll(board_input_snapshot_t *out)
     ESP_RETURN_ON_ERROR(pcnt_unit_get_count(s_encoder_unit, &raw_count), TAG, "pcnt read");
     const int pending_counts = raw_count - s_encoder_consumed_count;
     const int detents = pending_counts / ENCODER_COUNTS_PER_DETENT;
-    if (s_press_stable) {
+    if (s_encoder_button.stable) {
         /* Do not replay movement made while the knob is pressed. */
         s_encoder_consumed_count = raw_count;
     } else if (detents != 0) {

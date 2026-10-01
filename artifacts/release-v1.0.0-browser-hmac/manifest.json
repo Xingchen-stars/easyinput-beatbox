@@ -1,0 +1,65 @@
+{
+  "version": "1.0.0",
+  "variant": "browser-key-hmac-whitebox-backup",
+  "saved_date": "2026-10-01",
+  "release_status": "prerelease-recoverable-backup",
+  "hardware": {
+    "product": "EasyInput V2.0",
+    "chip": "esp32s3",
+    "flash_bytes": 16777216,
+    "psram_bytes": 8388608
+  },
+  "firmware": {
+    "file": "easyinput_beatbox_v1.0.0_browser_hmac.bin",
+    "bytes": 985264,
+    "sha256": "dea3720fbe7e20b45eaed2784bea83cc235f8046dd11ec80223afb1b1fe784f8",
+    "address": "0x430000",
+    "partition": "beatbox",
+    "partition_bytes": 2097152,
+    "idf": "5.5.5",
+    "build_command": "idf.py -D COMPONENTS=main build",
+    "main_source_files_matched": 42,
+    "source_config_files_matched": 45,
+    "source_hash_format": "raw bytes; firmware Git attributes preserve line endings"
+  },
+  "update_scope": [
+    "beatbox application only"
+  ],
+  "excluded": [
+    "factory",
+    "bootloader",
+    "partition-table writes",
+    "NVS",
+    "private browser keys",
+    "raw device logs"
+  ],
+  "verified": [
+    "source match",
+    "build",
+    "image checksum",
+    "flash hash",
+    "normal boot protocol v3",
+    "BLE advertisement",
+    "S7-window enrollment",
+    "known-browser HMAC reconnection",
+    "USB fallback user confirmation",
+    "27 web tests",
+    "TypeScript",
+    "Vite build"
+  ],
+  "pending": [
+    "automatic reconnect",
+    "trust after power cycle",
+    "all physical key/web feedback",
+    "BPM presets and A/B/Fill regression",
+    "three-credential rotation",
+    "long duration and range"
+  ],
+  "security_boundary": "Application HMAC authorization; enrollment and ordinary traffic are not BLE link encrypted.",
+  "repository": "https://github.com/Xingchen-stars/easyinput-beatbox",
+  "tag": "v1.0.0",
+  "licenses": {
+    "beatbox": "MIT",
+    "easyinput_factory": "PolyForm-Noncommercial-1.0.0"
+  }
+}

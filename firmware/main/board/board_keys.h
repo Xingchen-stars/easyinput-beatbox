@@ -11,7 +11,12 @@ extern "C" {
 
 typedef struct {
     bool s[8];
-    bool enc_press;
+    bool enc_down;
+    bool enc_pressed;
+    bool enc_released;
+    bool s7_pressed;
+    bool s7_released;
+    bool s8_pressed;
     int8_t enc_delta; /* +1 / -1 steps since last poll */
 } board_input_snapshot_t;
 

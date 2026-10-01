@@ -1,32 +1,69 @@
 #include "host_link.h"
 
+#include "beatbox_ble.h"
 #include "clock.h"
 #include "pattern.h"
 
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 static const char *TAG = "host";
+
+#define HOST_LINK_TX_BUFFER_SIZE 2048
+#define HOST_LINK_RX_BUFFER_SIZE 1024
+#define HOST_LINK_FRAME_SIZE      384
+#define HOST_LINK_TX_RETRY_MS      10
 
 static host_link_handlers_t s_handlers;
 static bool s_ready;
 static char s_rx_buf[768];
 static size_t s_rx_len;
-static int s_stdin_flags_set;
+
+static void host_write_usb(const char *line)
+{
+    if (line == NULL) {
+        return;
+    }
+    if (!s_ready) {
+        return;
+    }
+
+    /*
+     * Queue each JSON line as one ring-buffer item so log output cannot split
+     * the protocol frame.  A purely zero-timeout write is unsafe here: ESP-IDF
+     * logging uses the same USB driver and may hold the TX mutex briefly,
+     * which used to make every affected state/key frame disappear.  Keep the
+     * fast path non-blocking, then allow one short bounded retry.  This is long
+     * enough for normal mutex contention while still keeping the board input
+     * loop responsive when no browser is draining the endpoint.
+     */
+    char frame[HOST_LINK_FRAME_SIZE];
+    const int length = snprintf(frame, sizeof(frame), "%s\n", line);
+    if (length <= 0 || (size_t)length >= sizeof(frame)) {
+        return;
+    }
+    int written = usb_serial_jtag_write_bytes(frame, (size_t)length, 0);
+    if (written != length) {
+        (void)usb_serial_jtag_write_bytes(frame, (size_t)length,
+                                          pdMS_TO_TICKS(HOST_LINK_TX_RETRY_MS));
+    }
+}
 
 static void host_write(const char *line)
 {
-    if (!s_ready || line == NULL) {
+    if (line == NULL) {
         return;
     }
-    printf("%s\n", line);
-    fflush(stdout);
+
+    /* BLE is the daily transport; USB remains the wired recovery fallback. */
+    (void)beatbox_ble_send_line(line);
+    host_write_usb(line);
 }
 
 static bool extract_quoted_type(const char *line, char *out, size_t out_len)
@@ -98,15 +135,21 @@ static bool extract_quoted_field(const char *line, const char *key, char *out, s
 
 esp_err_t host_link_init(void)
 {
-    const int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
-    if (flags >= 0) {
-        (void)fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
-        s_stdin_flags_set = 1;
+    if (!usb_serial_jtag_is_driver_installed()) {
+        usb_serial_jtag_driver_config_t config = {
+            .tx_buffer_size = HOST_LINK_TX_BUFFER_SIZE,
+            .rx_buffer_size = HOST_LINK_RX_BUFFER_SIZE,
+        };
+        const esp_err_t error = usb_serial_jtag_driver_install(&config);
+        if (error != ESP_OK) {
+            return error;
+        }
     }
+    usb_serial_jtag_vfs_use_driver();
 
     s_ready = true;
     s_rx_len = 0;
-    ESP_LOGI(TAG, "USB Serial host link ready (protocol v2)");
+    ESP_LOGI(TAG, "USB Serial fallback ready (shared protocol v3)");
     host_link_send_hello();
     return ESP_OK;
 }
@@ -119,8 +162,8 @@ bool host_link_ready(void)
 void host_link_send_hello(void)
 {
     host_write(
-        "{\"t\":\"hello\",\"v\":2,\"name\":\"EasyInput Beatbox\",\"caps\":[\"drum\",\"pattern\","
-        "\"swing\",\"volume\",\"record\"]}");
+        "{\"t\":\"hello\",\"v\":3,\"name\":\"EasyInput Beatbox\",\"caps\":[\"drum\",\"pattern\","
+        "\"swing\",\"volume\",\"record\",\"ble_direct\"]}");
 }
 
 void host_link_send_start(void)
@@ -219,6 +262,11 @@ void host_link_send_error(const char *cmd, const char *msg)
     snprintf(line, sizeof(line), "{\"t\":\"error\",\"cmd\":\"%s\",\"msg\":\"%s\"}",
              cmd ? cmd : "", msg ? msg : "");
     host_write(line);
+}
+
+void host_link_send_usb_diagnostic(const char *line)
+{
+    host_write_usb(line);
 }
 
 void host_link_set_handlers(const host_link_handlers_t *handlers)
@@ -362,6 +410,13 @@ static void handle_line(const char *line)
     }
 }
 
+void host_link_process_line(const char *line)
+{
+    if (line != NULL && line[0] != '\0') {
+        handle_line(line);
+    }
+}
+
 void host_link_poll_rx(void)
 {
     if (!s_ready) {
@@ -370,18 +425,12 @@ void host_link_poll_rx(void)
 
     char chunk[128];
     while (true) {
-        const ssize_t n = read(STDIN_FILENO, chunk, sizeof(chunk));
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break;
-            }
-            break;
-        }
-        if (n == 0) {
+        const int n = usb_serial_jtag_read_bytes(chunk, sizeof(chunk), 0);
+        if (n <= 0) {
             break;
         }
 
-        for (ssize_t i = 0; i < n; ++i) {
+        for (int i = 0; i < n; ++i) {
             const char c = chunk[i];
             if (c == '\r') {
                 continue;
@@ -389,7 +438,7 @@ void host_link_poll_rx(void)
             if (c == '\n') {
                 if (s_rx_len > 0) {
                     s_rx_buf[s_rx_len] = '\0';
-                    handle_line(s_rx_buf);
+                    host_link_process_line(s_rx_buf);
                     s_rx_len = 0;
                 }
                 continue;
@@ -402,6 +451,5 @@ void host_link_poll_rx(void)
         }
     }
 
-    (void)s_stdin_flags_set;
     (void)TAG;
 }

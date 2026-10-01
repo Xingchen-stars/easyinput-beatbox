@@ -1,4 +1,4 @@
-/** Shared host-protocol v2 types and helpers. */
+/** Shared host-protocol v3 types and helpers (BLE primary, USB fallback). */
 
 export const BPM_MIN = 60;
 export const BPM_MAX = 240;

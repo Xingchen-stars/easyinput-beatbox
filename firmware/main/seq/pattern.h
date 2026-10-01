@@ -27,6 +27,8 @@ bool pattern_click_enabled(void);
 void pattern_set_swing(uint8_t swing);
 void pattern_set_click(bool enabled);
 void pattern_set_fill(bool held);
+/** Select A/B immediately; sequenced notes still begin on their next 16th grid position. */
+void pattern_set_variation(uint8_t var);
 /** Request A/B change; applied on the next 16th grid boundary. */
 void pattern_request_variation(uint8_t var);
 /** Apply any pending variation when tick is on a 16th grid. */

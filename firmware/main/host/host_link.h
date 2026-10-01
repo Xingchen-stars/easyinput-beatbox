@@ -10,8 +10,8 @@ extern "C" {
 #endif
 
 /**
- * Host link over USB-Serial/JTAG.
- * Domain events framed as newline JSON (protocol v2). See docs/host-protocol.md.
+ * Shared host protocol over direct BLE or USB-Serial/JTAG fallback.
+ * Domain events framed as newline JSON (protocol v3). See docs/host-protocol.md.
  */
 
 esp_err_t host_link_init(void);
@@ -32,6 +32,8 @@ void host_link_send_status(uint16_t bpm, bool running, uint8_t beat_in_bar, uint
 void host_link_send_pattern_dump(void);
 void host_link_send_ack(const char *cmd, bool ok, uint32_t rev);
 void host_link_send_error(const char *cmd, const char *msg);
+/** Send a preformatted diagnostic JSON line to USB only, never over BLE. */
+void host_link_send_usb_diagnostic(const char *line);
 
 typedef void (*host_on_transport_fn)(bool start, bool restart);
 typedef void (*host_on_bpm_fn)(uint16_t bpm);
@@ -65,6 +67,8 @@ typedef struct {
 } host_link_handlers_t;
 
 void host_link_set_handlers(const host_link_handlers_t *handlers);
+/** Process one complete JSON line received from any host transport. */
+void host_link_process_line(const char *line);
 void host_link_poll_rx(void);
 
 #ifdef __cplusplus

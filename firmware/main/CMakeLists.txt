@@ -4,6 +4,11 @@ idf_component_register(
         "board/board_power.c"
         "board/board_keys.c"
         "ui/led_status.c"
+        "ui/ble_pairing_gesture.c"
+        "ui/device_mode_selector.c"
+        "ui/tempo_selector.c"
+        "system/device_mode_boot.c"
+        "ble/beatbox_ble.c"
         "audio/audio_click.c"
         "seq/tempo.c"
         "seq/pattern.c"
@@ -15,12 +20,19 @@ idf_component_register(
         "audio"
         "seq"
         "ui"
+        "system"
+        "ble"
         "host"
     REQUIRES
         esp_driver_pcnt
         esp_driver_gpio
         esp_driver_i2s
+        esp_driver_usb_serial_jtag
         esp_timer
+        app_update
+        bt
+        mbedtls
+        nvs_flash
     EMBED_FILES
         "audio/samples/kick.raw"
         "audio/samples/snare.raw"
@@ -28,4 +40,9 @@ idf_component_register(
         "audio/samples/hihat_open.raw"
         "audio/samples/clap.raw"
         "audio/samples/rim.raw"
+        "audio/samples/tempo_slow.raw"
+        "audio/samples/tempo_original.raw"
+        "audio/samples/tempo_fast.raw"
+        "audio/samples/mode_beatbox.raw"
+        "audio/samples/mode_easyinput.raw"
 )

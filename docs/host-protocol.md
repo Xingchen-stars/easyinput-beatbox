@@ -2,7 +2,7 @@
 
 ## 结论
 
-对这套板子，**当前主链路是 USB-Serial/JTAG + Web Serial**。  
+对这套板子，**当前日常主链路是 BLE GATT + Web Bluetooth**，USB-Serial/JTAG + Web Serial 保留为首次烧录、排错与应急连接。
 消息是**领域命令/事件**；它们可以映射到 MIDI 语义（见 `midi-protocol.md`），但 JSON 本身不是 MIDI 字节流。
 
 为什么不先上 USB MIDI class device：
@@ -22,17 +22,41 @@
 
 板端永远是音频主时钟。主机不得驱动发声时基。
 
-## 帧格式
+## 传输与帧格式
 
-UTF-8，一行一条 JSON，`\n` 结尾。非 `{` 开头的行忽略（兼容偶发日志）。
+应用层统一使用 UTF-8、一条 JSON 一帧。USB 以 `\n` 结尾；BLE 因 MTU 较小，在每个 GATT 包前加 2 字节分片头：`flags`、`sequence`。`flags` 的 bit0 表示首片，bit1 表示末片。BLE 重组后交给与 USB 相同的 JSON 处理器。
 
-协议版本：`hello.v = 2`。v1 客户端仍可读 `state` / `beat` / `start` / `stop`。
+协议版本：`hello.v = 3`。v1/v2 客户端仍可读 `state` / `beat` / `start` / `stop`。
+
+BLE GATT UUID：
+
+| 用途 | UUID |
+| --- | --- |
+| Service | `8ab6c845-23e4-4f36-91df-8ac820b58101` |
+| Host → Device（Write） | `8ab6c845-23e4-4f36-91df-8ac820b58102` |
+| Device → Host（Notify） | `8ab6c845-23e4-4f36-91df-8ac820b58103` |
+
+### BLE 浏览器授权（应用层）
+
+BLE 连接、发现特征并订阅 Notify 后，设备先发送随机 challenge。未授权时，RX 只接受下面的登记/认证消息，普通 Beatbox 命令不进入主机协议队列。
+
+| 方向 | 消息 | 含义 |
+| --- | --- | --- |
+| Device → Host | `{"t":"ble_auth_challenge","nonce":"<32 hex>","pairing":0,"v":1}` | 16 字节新鲜随机数；`pairing=1` 表示 S7 登记窗口已开 |
+| Host → Device | `{"t":"ble_auth","id":"<16 hex>","proof":"<64 hex>"}` | 已登记浏览器发送 `HMAC-SHA256(key, raw_nonce)` |
+| Host → Device | `{"t":"ble_enroll","id":"<16 hex>","key":"<64 hex>"}` | 只在 S7 窗口内登记新浏览器 |
+| Device → Host | `{"t":"ble_auth_ok","mode":"known|enrolled","v":1}` | 认证/登记成功，随后才允许 `ping` 和其他命令 |
+| Device → Host | `{"t":"ble_auth_error","code":"...","pairing":0}` | 未知 client、proof 不匹配、challenge 无效或登记窗口未开 |
+
+浏览器使用 Web Crypto 生成 8 字节 client id 和 32 字节 key，并按 `BluetoothDevice.id` 保存在当前网站的 `localStorage`。设备在 NVS `beatbox_ble` 命名空间保存最多三份 `client0..client2`，超出后轮转替换。每次连接使用新 challenge，不在日常重连时重发 key。
+
+这是用实体 S7 限制新浏览器登记的应用层访问控制，不依赖 Windows `PairAsync` / BLE bonding。它可防止旧 proof 被直接重放，但本版的登记 key 与普通协议流量未在应用层加密；不能把这个认证机制表述为链路加密。
 
 ### Device → Host
 
 | 消息 | 含义 |
 | --- | --- |
-| `{"t":"hello","v":2,"name":"EasyInput Beatbox","caps":["drum","pattern","swing","volume","record"]}` | 身份与能力 |
+| `{"t":"hello","v":3,"name":"EasyInput Beatbox","caps":["drum","pattern","swing","volume","record","ble_direct"]}` | 身份与能力 |
 | `{"t":"state","bpm":120,"run":0,"beat":0,"step":0,"bar":0,"tick":0,"swing":50,"var":0,"fill":0,"rev":1,"click":1,"mode":0,"vol":100}` | 完整状态快照（约 2 Hz + 事件） |
 | `{"t":"position","bar":0,"step":0,"beat":0,"tick":0,"accent":1}` | 步进位置（播放中） |
 | `{"t":"beat","accent":1,"beat":0,"step":0}` | 四分拍点（v1 兼容；含 step0–15） |
@@ -42,6 +66,7 @@ UTF-8，一行一条 JSON，`\n` 结尾。非 `{` 开头的行忽略（兼容偶
 | `{"t":"start"}` / `{"t":"continue"}` / `{"t":"stop"}` | 运输变化 |
 | `{"t":"ack","cmd":"pattern_set","ok":1,"rev":2}` | 命令确认 |
 | `{"t":"error","cmd":"...","msg":"..."}` | 命令失败 |
+| `{"t":"ble_diag","event":"...",...}` | USB-only 白盒诊断帧；记录 BLE 连接、订阅、应用授权、旧 SMP 事件与断开原因，不通过 BLE 回传、不主动改写旧 bond |
 
 字段约定：
 
@@ -88,12 +113,16 @@ UTF-8，一行一条 JSON，`\n` 结尾。非 `{` 开头的行忽略（兼容偶
 
 ## 配套 UI
 
-`app/` 使用 Web Serial：
+`app/` 优先使用 Web Bluetooth：
 
-1. 首次点击「连接」，授权 Espressif（VID `0x303A`）串口
-2. 之后插拔可自动重连（`navigator.serial.getPorts()`）
-3. 仅在收到合法 `hello` + `state` 后进入 `synced`
-4. Pattern 编辑使用本地 draft + `rev` 提交；冲突时以设备权威并提示用户
+1. 停止播放后按住开发板 S7 三秒，蓝灯亮起，开放 60 秒新浏览器登记窗口；
+2. 网页点击「蓝牙连接」，在浏览器选择 `EasyInput Beatbox`；不再输入设备配网码；
+3. 网页生成随机浏览器凭据，并只在 S7 窗口内写入 Beatbox 的三槽应用信任表；窗口外拒绝未登记浏览器；
+4. 浏览器已授权过的设备可通过 `navigator.bluetooth.getDevices()` 尝试自动重连；浏览器的首次设备选择仍必须由用户点击触发；
+5. USB 备用按钮继续使用 Espressif VID `0x303A`，便于恢复和排错；
+6. 仅在收到合法 `hello` + `state` 后进入 `synced`；Pattern 编辑使用本地 draft + `rev` 提交。
+
+Beatbox 的应用级浏览器凭据与 EasyInput 键盘模式的 BLE HID 配对记录分开管理；Beatbox 不主动擦除或替换共享 NimBLE bond 数据。
 
 ## 与 MIDI 的对应
 

@@ -1,15 +1,22 @@
 #include "audio_click.h"
+#include "beatbox_ble.h"
+#include "ble_pairing_gesture.h"
 #include "board_keys.h"
 #include "board_power.h"
 #include "clock.h"
+#include "device_mode_boot.h"
+#include "device_mode_selector.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "host_link.h"
 #include "led_status.h"
 #include "pattern.h"
+#include "sdkconfig.h"
 #include "tempo.h"
+#include "tempo_selector.h"
 
 static const char *TAG = "beatbox";
 static bool s_audio_ready;
@@ -24,6 +31,9 @@ static bool s_fill_held;
 static bool s_drum_mode;
 /* Host UI overdub: lock S7 / S8 / encoder press while armed. */
 static bool s_record_armed;
+static tempo_selector_t s_tempo_selector;
+static device_mode_selector_t s_device_mode_selector;
+static ble_pairing_gesture_t s_ble_pairing_gesture;
 
 static void send_status(void)
 {
@@ -32,19 +42,30 @@ static void send_status(void)
                           s_last_bar, s_last_tick, s_drum_mode, volume);
 }
 
-static void apply_encoder_bpm(int8_t delta)
+static void apply_bpm(uint16_t bpm, const char *source)
 {
-    if (delta == 0) {
-        return;
-    }
     const int64_t now = esp_timer_get_time();
-    tempo_set_bpm((uint16_t)((int)tempo_get_bpm() + (int)delta));
+    tempo_set_bpm(beatbox_clamp_bpm(bpm));
     if (s_audio_ready) {
         (void)audio_click_set_bpm(tempo_get_bpm());
     }
     led_status_show_tempo(tempo_get_bpm(), now);
     send_status();
-    ESP_LOGI(TAG, "BPM -> %u", tempo_get_bpm());
+    ESP_LOGI(TAG, "BPM from %s -> %u", source, tempo_get_bpm());
+}
+
+static void apply_encoder_bpm(int8_t delta)
+{
+    if (delta == 0) {
+        return;
+    }
+    int next_bpm = (int)tempo_get_bpm() + (int)delta;
+    if (next_bpm < BEATBOX_BPM_MIN) {
+        next_bpm = BEATBOX_BPM_MIN;
+    } else if (next_bpm > BEATBOX_BPM_MAX) {
+        next_bpm = BEATBOX_BPM_MAX;
+    }
+    apply_bpm((uint16_t)next_bpm, "encoder");
 }
 
 static void render_event(const audio_beat_event_t *event, int64_t now_us)
@@ -112,6 +133,142 @@ static void transport_set(bool running, bool restart, bool from_host)
     send_status();
 }
 
+static void toggle_transport_from_button(bool encoder_source)
+{
+    if (encoder_source) {
+        /* Mirror the encoder click on the S8 pad in the host UI. */
+        host_link_send_key(7, true);
+    }
+    if (tempo_is_running()) {
+        transport_set(false, false, false);
+    } else {
+        /* Resume from saved position; Start only when already at zero. */
+        const bool at_zero = s_last_bar == 0 && s_last_step == 0 && s_last_tick == 0;
+        transport_set(true, at_zero, false);
+    }
+}
+
+static void handle_tempo_selector_event(tempo_selector_event_t event, int64_t now_us)
+{
+    switch (event) {
+    case TEMPO_SELECTOR_EVENT_TRANSPORT:
+        toggle_transport_from_button(true);
+        break;
+    case TEMPO_SELECTOR_EVENT_ENTERED:
+        led_status_show_tempo(tempo_selector_selected_bpm(&s_tempo_selector), now_us);
+        ESP_LOGI(TAG, "Tempo preset selection entered @ %u BPM",
+                 tempo_selector_selected_bpm(&s_tempo_selector));
+        break;
+    case TEMPO_SELECTOR_EVENT_PREVIEW_CHANGED: {
+        const uint8_t index = tempo_selector_selected_index(&s_tempo_selector);
+        const uint16_t bpm = tempo_selector_selected_bpm(&s_tempo_selector);
+        led_status_show_tempo(bpm, now_us);
+        if (s_audio_ready) {
+            (void)audio_click_play_tempo_prompt((audio_tempo_prompt_t)index);
+        }
+        ESP_LOGI(TAG, "Tempo preset preview -> index=%u bpm=%u", (unsigned)index,
+                 (unsigned)bpm);
+        break;
+    }
+    case TEMPO_SELECTOR_EVENT_CONFIRMED:
+        apply_bpm(tempo_selector_selected_bpm(&s_tempo_selector), "preset");
+        ESP_LOGI(TAG, "Tempo preset confirmed");
+        break;
+    case TEMPO_SELECTOR_EVENT_CANCELLED:
+        ESP_LOGI(TAG, "Tempo preset selection timed out; BPM unchanged");
+        break;
+    case TEMPO_SELECTOR_EVENT_NONE:
+    default:
+        break;
+    }
+}
+
+static void play_device_mode_prompt(void)
+{
+    if (!s_audio_ready) {
+        return;
+    }
+    const uint8_t selected = device_mode_selector_selected_index(&s_device_mode_selector);
+    (void)audio_click_play_device_mode_prompt(
+        selected == DEVICE_MODE_EASYINPUT ? AUDIO_DEVICE_MODE_PROMPT_EASYINPUT
+                                          : AUDIO_DEVICE_MODE_PROMPT_BEATBOX);
+}
+
+static void handle_device_mode_selector_event(device_mode_selector_event_t event,
+                                               int64_t now_us)
+{
+    switch (event) {
+    case DEVICE_MODE_SELECTOR_EVENT_RELEASED_BEFORE_HOLD:
+        if (!s_record_armed) {
+            /*
+             * A previous click may have matured while this press was held.
+             * Resolve it first, then register this release as the next click.
+             */
+            handle_tempo_selector_event(tempo_selector_poll(&s_tempo_selector, now_us),
+                                        now_us);
+            handle_tempo_selector_event(
+                tempo_selector_on_encoder_click(&s_tempo_selector, tempo_get_bpm(), now_us),
+                now_us);
+        }
+        break;
+    case DEVICE_MODE_SELECTOR_EVENT_ENTERED:
+        tempo_selector_cancel(&s_tempo_selector);
+        (void)led_status_set_solid_rgb(0, 0, 24);
+        play_device_mode_prompt();
+        ESP_LOGI(TAG, "Device mode selection entered; current=beatbox");
+        break;
+    case DEVICE_MODE_SELECTOR_EVENT_PREVIEW_CHANGED:
+        (void)led_status_set_solid_rgb(
+            device_mode_selector_selected_index(&s_device_mode_selector) ==
+                    DEVICE_MODE_EASYINPUT
+                ? 0
+                : 18,
+            0,
+            device_mode_selector_selected_index(&s_device_mode_selector) ==
+                    DEVICE_MODE_EASYINPUT
+                ? 24
+                : 8);
+        play_device_mode_prompt();
+        ESP_LOGI(TAG, "Device mode preview -> %u",
+                 (unsigned)device_mode_selector_selected_index(&s_device_mode_selector));
+        break;
+    case DEVICE_MODE_SELECTOR_EVENT_CONFIRMED: {
+        const device_mode_id_t selected =
+            (device_mode_id_t)device_mode_selector_selected_index(&s_device_mode_selector);
+        if (selected == DEVICE_MODE_BEATBOX) {
+            (void)led_status_clear();
+            ESP_LOGI(TAG, "Device mode unchanged: beatbox");
+            break;
+        }
+
+        if (tempo_is_running()) {
+            transport_set(false, false, false);
+        }
+        if (s_audio_ready) {
+            (void)audio_click_stop();
+        }
+        const esp_err_t err = device_mode_boot_select(selected);
+        if (err != ESP_OK) {
+            (void)led_status_set_solid_rgb(32, 0, 0);
+            ESP_LOGE(TAG, "Device mode switch rejected: %s", esp_err_to_name(err));
+            break;
+        }
+
+        (void)led_status_set_solid_rgb(20, 10, 0);
+        vTaskDelay(pdMS_TO_TICKS(120));
+        esp_restart();
+        break;
+    }
+    case DEVICE_MODE_SELECTOR_EVENT_CANCELLED:
+        (void)led_status_clear();
+        ESP_LOGI(TAG, "Device mode selection timed out; mode unchanged");
+        break;
+    case DEVICE_MODE_SELECTOR_EVENT_NONE:
+    default:
+        break;
+    }
+}
+
 static void on_host_transport(bool start, bool restart)
 {
     transport_set(start, restart, true);
@@ -119,12 +276,8 @@ static void on_host_transport(bool start, bool restart)
 
 static void on_host_bpm(uint16_t bpm)
 {
-    tempo_set_bpm(beatbox_clamp_bpm(bpm));
-    if (s_audio_ready) {
-        (void)audio_click_set_bpm(tempo_get_bpm());
-    }
-    send_status();
-    ESP_LOGI(TAG, "BPM from host -> %u", tempo_get_bpm());
+    tempo_selector_cancel(&s_tempo_selector);
+    apply_bpm(bpm, "host");
 }
 
 static void on_host_swing(uint8_t swing)
@@ -133,10 +286,16 @@ static void on_host_swing(uint8_t swing)
     send_status();
 }
 
+static void apply_variation(uint8_t var, const char *source)
+{
+    pattern_set_variation(var);
+    send_status();
+    ESP_LOGI(TAG, "Variation from %s -> %c", source, pattern_variation() ? 'B' : 'A');
+}
+
 static void on_host_variation(uint8_t var)
 {
-    pattern_request_variation(var);
-    send_status();
+    apply_variation(var, "host");
 }
 
 static void on_host_fill(bool held)
@@ -208,6 +367,10 @@ static void on_host_ping(void)
 static void on_host_record(bool armed)
 {
     s_record_armed = armed;
+    if (armed) {
+        tempo_selector_cancel(&s_tempo_selector);
+        device_mode_selector_cancel(&s_device_mode_selector);
+    }
     if (armed && s_fill_held) {
         on_host_fill(false);
     }
@@ -245,7 +408,8 @@ static void handle_pads(const board_input_snapshot_t *in)
 
     if (s_record_armed) {
         /* Recording: ignore S7 A/B|Fill and clear any pending hold state. */
-        if (!in->s[6] && s_prev_keys[6]) {
+        ble_pairing_gesture_cancel(&s_ble_pairing_gesture);
+        if (in->s7_released) {
             if (s7_fill_from_hold && s_fill_held) {
                 on_host_fill(false);
             }
@@ -255,9 +419,29 @@ static void handle_pads(const board_input_snapshot_t *in)
             s7_armed = false;
             s7_fill_from_hold = false;
         }
+    } else if (!tempo_is_running()) {
+        /* Stopped: short S7 keeps A/B; a deliberate 3 s hold opens BLE pairing. */
+        if (s7_fill_from_hold && s_fill_held) {
+            on_host_fill(false);
+        }
+        s7_armed = false;
+        s7_fill_from_hold = false;
+        const ble_pairing_gesture_event_t pairing_event =
+            ble_pairing_gesture_update(&s_ble_pairing_gesture, in->s[6], now);
+        if (pairing_event == BLE_PAIRING_GESTURE_SHORT_TAP) {
+            apply_variation(pattern_variation() ? 0 : 1, "S7");
+        } else if (pairing_event == BLE_PAIRING_GESTURE_OPEN_WINDOW) {
+            const esp_err_t err = beatbox_ble_open_pairing_window(now);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "S7 physical pairing window opened");
+            } else {
+                ESP_LOGW(TAG, "S7 pairing window rejected: %s", esp_err_to_name(err));
+            }
+        }
     } else {
-        /* S7: hold engages Fill; short tap toggles A/B. */
-        if (in->s[6] && !s_prev_keys[6]) {
+        /* Playing: preserve the original S7 hold=Fill, short tap=A/B behavior. */
+        ble_pairing_gesture_cancel(&s_ble_pairing_gesture);
+        if (in->s7_pressed) {
             s7_down_us = now;
             s7_armed = true;
             s7_fill_from_hold = false;
@@ -268,14 +452,13 @@ static void handle_pads(const board_input_snapshot_t *in)
                 on_host_fill(true);
             }
         }
-        if (!in->s[6] && s_prev_keys[6]) {
+        if (in->s7_released) {
             if (s7_fill_from_hold) {
                 if (s_fill_held) {
                     on_host_fill(false);
                 }
             } else if (s7_armed) {
-                pattern_request_variation(pattern_variation() ? 0 : 1);
-                send_status();
+                apply_variation(pattern_variation() ? 0 : 1, "S7");
             }
             s7_armed = false;
             s7_fill_from_hold = false;
@@ -319,10 +502,19 @@ void app_main(void)
         s_audio_ready = true;
     }
     ESP_ERROR_CHECK(tempo_init(120));
+    tempo_selector_init(&s_tempo_selector);
+    device_mode_selector_init(&s_device_mode_selector, DEVICE_MODE_COUNT);
+    ble_pairing_gesture_init(&s_ble_pairing_gesture);
     if (s_audio_ready) {
         ESP_ERROR_CHECK(audio_click_set_bpm(tempo_get_bpm()));
         ESP_ERROR_CHECK(audio_click_set_metronome(pattern_click_enabled()));
         ESP_ERROR_CHECK(audio_click_set_mode(AUDIO_MODE_METRONOME));
+    }
+
+    const esp_err_t ble_err = beatbox_ble_init();
+    if (ble_err != ESP_OK) {
+        ESP_LOGW(TAG, "Direct BLE init failed (%s); USB fallback remains available",
+                 esp_err_to_name(ble_err));
     }
 
     ESP_ERROR_CHECK(led_status_set_solid_rgb(0, 18, 0));
@@ -332,7 +524,10 @@ void app_main(void)
     host_link_send_hello();
     host_link_send_pattern_dump();
     send_status();
-    ESP_LOGI(TAG, "Ready. Pads=S1-6, S7=A/B|Fill-hold, Play=enc/S8, USB=Serial v2");
+    ESP_LOGI(TAG,
+             "Ready. Pads=S1-6, S7=A/B|Fill-hold, Play=S8/enc-click, "
+             "Pairing=stopped-S7-hold-3s, Presets=enc-double-click, "
+             "DeviceModes=enc-hold-5s");
 
     int64_t last_status_us = 0;
     int64_t last_hello_us = 0;
@@ -341,28 +536,59 @@ void app_main(void)
     while (true) {
         board_input_snapshot_t in = {0};
         ESP_ERROR_CHECK(board_keys_poll(&in));
-        apply_encoder_bpm(in.enc_delta);
+        const int64_t input_now = esp_timer_get_time();
 
-        /* S8 / encoder press: Play-Stop — locked out while host REC is armed. */
-        if (in.enc_press && !s_record_armed) {
-            /* Encoder click mirrors S8 in the host pad matrix when S8 wasn't the source. */
-            if (!in.s[7]) {
-                host_link_send_key(7, true);
-            }
-            if (tempo_is_running()) {
-                transport_set(false, false, false);
+        if (!s_record_armed) {
+            handle_device_mode_selector_event(
+                device_mode_selector_poll(&s_device_mode_selector, input_now), input_now);
+        }
+
+        if (!s_record_armed && !in.enc_down &&
+            !device_mode_selector_is_active(&s_device_mode_selector)) {
+            handle_tempo_selector_event(tempo_selector_poll(&s_tempo_selector, input_now),
+                                        input_now);
+        }
+
+        if (in.enc_delta != 0) {
+            if (device_mode_selector_is_active(&s_device_mode_selector)) {
+                handle_device_mode_selector_event(
+                    device_mode_selector_on_rotate(&s_device_mode_selector, in.enc_delta,
+                                                   input_now),
+                    input_now);
+            } else if (tempo_selector_is_active(&s_tempo_selector)) {
+                handle_tempo_selector_event(
+                    tempo_selector_on_rotate(&s_tempo_selector, in.enc_delta, input_now),
+                    input_now);
             } else {
-                /* Resume from saved position; Start only when already at zero. */
-                const bool at_zero =
-                    s_last_bar == 0 && s_last_step == 0 && s_last_tick == 0;
-                transport_set(true, at_zero, false);
+                apply_encoder_bpm(in.enc_delta);
             }
+        }
+
+        if (in.enc_pressed || in.enc_released) {
+            handle_device_mode_selector_event(
+                device_mode_selector_on_button(&s_device_mode_selector, in.enc_down,
+                                               DEVICE_MODE_BEATBOX, input_now),
+                input_now);
+        }
+
+        /* S8 remains a separate, immediate, debounced transport control. */
+        if (in.s8_pressed && !s_record_armed) {
+            toggle_transport_from_button(false);
         }
 
         handle_pads(&in);
         host_link_poll_rx();
 
         const int64_t now = esp_timer_get_time();
+        beatbox_ble_poll(now);
+        char ble_line[BEATBOX_BLE_LINE_MAX];
+        while (beatbox_ble_pop_line(ble_line, sizeof(ble_line))) {
+            host_link_process_line(ble_line);
+        }
+        char ble_diag_line[BEATBOX_BLE_DIAG_LINE_MAX];
+        while (beatbox_ble_pop_diag_line(ble_diag_line, sizeof(ble_diag_line))) {
+            host_link_send_usb_diagnostic(ble_diag_line);
+        }
 
         audio_beat_event_t beat_event;
         while (s_audio_ready && audio_click_poll_beat(&beat_event)) {
@@ -371,7 +597,11 @@ void app_main(void)
 
         if (now - last_led_frame_us >= 20000) {
             last_led_frame_us = now;
-            (void)led_status_update(now, tempo_get_bpm(), tempo_is_running());
+            if (beatbox_ble_pairing_open()) {
+                (void)led_status_set_solid_rgb(0, 0, 24);
+            } else {
+                (void)led_status_update(now, tempo_get_bpm(), tempo_is_running());
+            }
         }
 
         if (now - last_status_us > 500000) {

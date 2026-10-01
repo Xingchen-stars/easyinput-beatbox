@@ -30,11 +30,13 @@ const NOTE_TO_PAD: Record<number, number> = {
   [NOTE_SNARE]: 5,
 };
 
+export type DeviceLink = "none" | "ble" | "serial" | "midi";
+
 export type DeviceState = {
   sync: SyncStatus;
   connected: boolean;
   deviceName: string;
-  link: "none" | "serial" | "midi";
+  link: DeviceLink;
   protocolVersion: number;
   caps: string[];
   bpm: number;
@@ -129,7 +131,7 @@ export function reduceHostMessage(state: DeviceState, msg: HostInbound): DeviceS
       return {
         ...state,
         connected: true,
-        link: "serial",
+        link: state.link === "ble" ? "ble" : "serial",
         deviceName: name,
         protocolVersion: msg.v ?? 1,
         caps: msg.caps ?? [],
@@ -257,12 +259,15 @@ export function reduceHostLine(state: DeviceState, line: string): DeviceState {
   return reduceHostMessage(state, msg);
 }
 
-export function markConnecting(state: DeviceState): DeviceState {
+export function markConnecting(
+  state: DeviceState,
+  link: Exclude<DeviceLink, "none" | "midi"> = "serial",
+): DeviceState {
   return {
     ...state,
     connected: true,
     sync: "connecting",
-    link: "serial",
+    link,
     deviceName: "EasyInput Beatbox",
     patternDirty: false,
     updatedAt: Date.now(),

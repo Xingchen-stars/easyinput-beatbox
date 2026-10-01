@@ -1,6 +1,6 @@
 # EasyInput Beatbox Desktop
 
-Electron 套壳：复用 `app/` 的 Web Serial UI。选用 Electron 而非 Tauri，是因为本应用依赖 **Web Serial**，macOS 上 Tauri 的系统 WebView（WKWebView）不支持该 API。
+Electron 套壳：复用 `app/` 的 Web Bluetooth / Web Serial UI。日常控制优先使用直连蓝牙，USB 作为备用；Electron 同时处理这两类设备授权。
 
 ## 开发
 

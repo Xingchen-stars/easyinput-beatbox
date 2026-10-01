@@ -6,16 +6,30 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = process.argv.includes("--dev");
 const ESPRESSIF_VID = 0x303a;
 const DEV_URL = "http://127.0.0.1:5173";
+const BEATBOX_BLE_NAME = "EasyInput Beatbox";
+const DEVICE_PERMISSIONS = new Set(["serial", "bluetooth", "bluetooth-scanning"]);
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
 
-function wireSerialPermissions() {
+function isTrustedRendererOrigin(origin) {
+  return origin === "file://" || origin.startsWith("file:///") || origin.startsWith(DEV_URL);
+}
+
+function wireDevicePermissions() {
   const ses = session.defaultSession;
 
-  ses.setPermissionCheckHandler((_wc, permission) => permission === "serial");
+  ses.setPermissionCheckHandler((_wc, permission, requestingOrigin) => {
+    return DEVICE_PERMISSIONS.has(permission) && isTrustedRendererOrigin(requestingOrigin);
+  });
 
-  ses.setDevicePermissionHandler((details) => details.deviceType === "serial");
+  ses.setPermissionRequestHandler((webContents, permission, callback) => {
+    callback(DEVICE_PERMISSIONS.has(permission) && isTrustedRendererOrigin(webContents.getURL()));
+  });
+
+  ses.setDevicePermissionHandler(
+    (details) => details.deviceType === "serial" && isTrustedRendererOrigin(details.origin),
+  );
 
   ses.on("select-serial-port", (event, portList, _webContents, callback) => {
     event.preventDefault();
@@ -86,6 +100,27 @@ async function createWindow() {
     show: false,
   });
 
+  let pendingBluetoothSelection = null;
+  const finishBluetoothSelection = (deviceId = "") => {
+    if (!pendingBluetoothSelection) return;
+    clearTimeout(pendingBluetoothSelection.timer);
+    const { callback } = pendingBluetoothSelection;
+    pendingBluetoothSelection = null;
+    callback(deviceId);
+  };
+
+  mainWindow.webContents.on("select-bluetooth-device", (event, deviceList, callback) => {
+    event.preventDefault();
+    if (!pendingBluetoothSelection) {
+      pendingBluetoothSelection = {
+        callback,
+        timer: setTimeout(() => finishBluetoothSelection(), 15000),
+      };
+    }
+    const target = deviceList.find((device) => device.deviceName?.startsWith(BEATBOX_BLE_NAME));
+    if (target) finishBluetoothSelection(target.deviceId);
+  });
+
   mainWindow.once("ready-to-show", () => {
     /* Force exact bounds — main-process edits need a full Electron restart. */
     mainWindow?.setSize(winWidth, winHeight);
@@ -105,12 +140,13 @@ async function createWindow() {
   }
 
   mainWindow.on("closed", () => {
+    finishBluetoothSelection();
     mainWindow = null;
   });
 }
 
 app.whenReady().then(async () => {
-  wireSerialPermissions();
+  wireDevicePermissions();
   await createWindow();
 
   app.on("activate", () => {

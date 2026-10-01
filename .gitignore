@@ -3,6 +3,8 @@ build/
 sdkconfig
 sdkconfig.old
 dependencies.lock
+!firmware/dependencies.lock
+!easyinput-factory/dependencies.lock
 managed_components/
 .cache/
 
@@ -22,6 +24,10 @@ __pycache__/
 node_modules/
 app/node_modules/
 app/dist/
+.pnpm-store/
+
+# Local legacy recovery bundle (release-v1.0.0 contains the publishable packages)
+artifacts/dual-mode-2026-09-04/
 
 # Local artifacts
 *.log
@@ -31,6 +37,12 @@ out/
 *.elf
 *.map
 *.uf2
+*.bundle
+artifacts/**/*.zip
+artifacts/**/RELEASE-ASSETS.sha256
+
+# Preserve the exact verified Beatbox application alongside its source tag.
+!artifacts/release-v1.0.0-browser-hmac/easyinput_beatbox_v1.0.0_browser_hmac.bin
 
 # Keep sample placeholders, ignore large local packs
 assets/samples/local/

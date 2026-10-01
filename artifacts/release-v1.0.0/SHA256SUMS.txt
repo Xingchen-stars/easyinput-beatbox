@@ -1,0 +1,3 @@
+56edc4ced0cdc2b3a321ef0c50b50f62062db91e6d9ecca27dffc8a1e76336f9  easyinput_beatbox_v1.0.0.bin
+cdd3f0f6def97c6a0675c0f2ae0be5169f14bc746264b5800ee8a270b0983606  partitions.csv
+e788ad8bebf0b4f2c9fd76acfacc7d2dd05127ed3bed7cc4cfb5f48a84c7228f  flash_args.beatbox-update

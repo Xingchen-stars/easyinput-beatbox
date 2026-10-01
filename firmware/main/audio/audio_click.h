@@ -25,6 +25,17 @@ typedef enum {
     AUDIO_MODE_DRUM = 1,
 } audio_mode_t;
 
+typedef enum {
+    AUDIO_TEMPO_PROMPT_SLOW = 0,
+    AUDIO_TEMPO_PROMPT_ORIGINAL,
+    AUDIO_TEMPO_PROMPT_FAST,
+} audio_tempo_prompt_t;
+
+typedef enum {
+    AUDIO_DEVICE_MODE_PROMPT_BEATBOX = 0,
+    AUDIO_DEVICE_MODE_PROMPT_EASYINPUT,
+} audio_device_mode_prompt_t;
+
 /**
  * Continuous, sample-clocked I2S renderer.
  *
@@ -51,6 +62,10 @@ bool audio_click_poll_beat(audio_beat_event_t *event);
 esp_err_t audio_click_play_normal(void);
 esp_err_t audio_click_play_accent(void);
 esp_err_t audio_click_play_note(uint8_t note, uint8_t velocity);
+/** Speak one non-blocking tempo preset name through the existing mixer. */
+esp_err_t audio_click_play_tempo_prompt(audio_tempo_prompt_t prompt);
+/** Speak one non-blocking top-level device-mode name. */
+esp_err_t audio_click_play_device_mode_prompt(audio_device_mode_prompt_t prompt);
 
 /** Current transport position (safe to read from main task). */
 void audio_click_get_position(uint32_t *bar, uint8_t *step, uint8_t *beat, uint16_t *tick);

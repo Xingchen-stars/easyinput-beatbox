@@ -79,6 +79,13 @@ void pattern_set_fill(bool held)
     s_fill = held;
 }
 
+void pattern_set_variation(uint8_t var)
+{
+    s_var = var ? 1 : 0;
+    s_pending_var = s_var;
+    s_var_pending = false;
+}
+
 void pattern_request_variation(uint8_t var)
 {
     s_pending_var = var ? 1 : 0;

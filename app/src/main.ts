@@ -1,4 +1,5 @@
 import {
+  Bluetooth,
   createIcons,
   Download,
   Eraser,
@@ -11,7 +12,7 @@ import {
 } from "lucide";
 import "./styles.css";
 import { DRUM_ICONS, type DrumIconId } from "./drum-icons";
-import { BeatboxLink } from "./link";
+import { BeatboxLink, describeBluetoothConnectionError } from "./link";
 import {
   clearPattern,
   clearTrack,
@@ -35,6 +36,19 @@ import {
   TRACK_LABELS,
   TRACK_NOTES,
 } from "./protocol";
+import { syncEditBankFromVariation, type EditBank } from "./bank-sync";
+import { TEMPO_PRESETS } from "./tempo-presets";
+const UI_ICONS = {
+  Bluetooth,
+  Download,
+  Eraser,
+  Pause,
+  Play,
+  Trash2,
+  Upload,
+  Volume2,
+  VolumeX,
+};
 
 /**
  * Physical 4×2 matrix (S1–S4 top, S5–S8 bottom).
@@ -70,9 +84,14 @@ root.innerHTML = `
         <span class="eyebrow">EasyInput · Performance</span>
       </div>
       <div class="top-actions">
-        <button class="connect-button" id="btnConnect" type="button" aria-label="连接设备">
+        <button class="usb-connect-button" id="btnUsbConnect" type="button"
+                aria-label="使用 USB 备用连接" title="USB 备用连接">
+          <span>USB 备用</span>
+        </button>
+        <button class="connect-button" id="btnConnect" type="button" aria-label="蓝牙连接设备">
+          <i data-lucide="bluetooth" aria-hidden="true"></i>
           <span class="dot" id="connDot"></span>
-          <span id="connLabel">连接设备</span>
+          <span id="connLabel">蓝牙连接</span>
         </button>
       </div>
     </div>
@@ -133,6 +152,16 @@ root.innerHTML = `
           <input id="tempoSlider" type="range" min="60" max="240" step="1" value="120"
                  aria-label="调整 BPM" disabled />
           <span>240</span>
+        </div>
+        <div class="tempo-presets" role="group" aria-label="快捷速度">
+          ${TEMPO_PRESETS.map(
+            (preset) => `
+              <button class="tempo-preset" type="button" data-bpm="${preset.bpm}"
+                      aria-label="${preset.label} ${preset.bpm} BPM" aria-pressed="false" disabled>
+                <span>${preset.label}</span>
+                <strong>${preset.bpm}</strong>
+              </button>`,
+          ).join("")}
         </div>
       </div>
 
@@ -239,9 +268,10 @@ root.innerHTML = `
       </div>
     </section>
   </main>
+
 `;
 
-createIcons({ icons: { Download, Eraser, Pause, Play, Trash2, Upload, Volume2, VolumeX } });
+createIcons({ icons: UI_ICONS });
 
 const padsEl = root.querySelector<HTMLDivElement>("#pads")!;
 for (const pad of HW_PADS) {
@@ -304,6 +334,7 @@ const els = {
   bpm: root.querySelector<HTMLElement>("#bpm")!,
   tempoValue: root.querySelector<HTMLElement>("#tempoValue")!,
   tempoSlider: root.querySelector<HTMLInputElement>("#tempoSlider")!,
+  tempoPresets: [...root.querySelectorAll<HTMLButtonElement>(".tempo-preset")],
   swingValue: root.querySelector<HTMLElement>("#swingValue")!,
   swingSlider: root.querySelector<HTMLInputElement>("#swingSlider")!,
   volumeValue: root.querySelector<HTMLElement>("#volumeValue")!,
@@ -312,6 +343,7 @@ const els = {
   beats: [...root.querySelectorAll<HTMLElement>(".beat-slice")],
   btnTransport: root.querySelector<HTMLButtonElement>("#btnTransport")!,
   btnConnect: root.querySelector<HTMLButtonElement>("#btnConnect")!,
+  btnUsbConnect: root.querySelector<HTMLButtonElement>("#btnUsbConnect")!,
   metroEnable: root.querySelector<HTMLInputElement>("#metroEnable")!,
   metroState: root.querySelector<HTMLElement>("#metroState")!,
   drumEnable: root.querySelector<HTMLInputElement>("#drumEnable")!,
@@ -341,7 +373,8 @@ let pendingSliderBpm: number | null = null;
 let pendingSliderVolume: number | null = null;
 let sliderFrame = 0;
 let volumeFrame = 0;
-let editBank: 0 | 1 | 2 = 0;
+let editBank: EditBank = 0;
+let lastDeviceVariation = link.getState().variation;
 let selectedTrack = 0;
 let undoStack: PatternBanks[] = [];
 let recording = false;
@@ -384,7 +417,7 @@ function updateTransportIcon(running: boolean) {
   els.btnTransport.innerHTML = `<i data-lucide="${iconName}"></i>`;
   els.btnTransport.ariaLabel = label;
   els.btnTransport.title = label;
-  createIcons({ icons: { Pause, Play } });
+  createIcons({ icons: UI_ICONS });
 }
 
 function patternStatusText(edit: 0 | 1 | 2, isRecording: boolean): string {
@@ -472,16 +505,19 @@ function render() {
   els.connDot.classList.toggle("stale", s.sync === "stale");
   els.btnConnect.classList.toggle("connected", s.connected);
   els.btnConnect.classList.toggle("stale", s.sync === "stale");
+  els.btnUsbConnect.disabled = s.connected;
   const syncText = !s.connected
-    ? "连接设备"
+    ? "蓝牙连接"
     : s.sync === "connecting"
-      ? "同步中…"
+      ? `${s.link === "ble" ? "蓝牙" : "USB"}同步中…`
       : s.sync === "stale"
-        ? `${s.deviceName} · 延迟`
-        : `${s.deviceName} · 断开`;
+        ? `${s.link === "ble" ? "蓝牙" : "USB"} · 延迟`
+        : `${s.link === "ble" ? "蓝牙" : "USB"}已连接 · 断开`;
   els.connLabel.textContent = syncText;
-  els.btnConnect.ariaLabel = s.connected ? "断开设备" : "连接设备";
-  els.btnConnect.title = s.connected ? "点击断开" : "点击连接";
+  els.btnConnect.ariaLabel = s.connected ? "断开设备" : "蓝牙连接设备";
+  els.btnConnect.title = s.connected
+    ? "点击断开"
+    : "新电脑首次连接：停止播放后按住开发板 S7 三秒，再点这里";
 
   els.bpm.textContent = String(s.bpm);
   els.tempoValue.textContent = `${s.bpm} BPM`;
@@ -507,6 +543,12 @@ function render() {
   const ready = s.connected && s.sync !== "disconnected";
   els.btnTransport.disabled = !ready;
   els.tempoSlider.disabled = !ready;
+  for (const button of els.tempoPresets) {
+    const active = Number(button.dataset.bpm) === s.bpm;
+    button.disabled = !ready;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
   els.swingSlider.disabled = !ready;
   els.volumeSlider.disabled = !ready;
   els.metroEnable.disabled = !ready;
@@ -598,6 +640,9 @@ function mutatePattern(mutator: (pattern: PatternBanks) => PatternBanks) {
 
 let keyFlashTimer = 0;
 link.subscribe((s) => {
+  editBank = syncEditBankFromVariation(editBank, lastDeviceVariation, s.variation);
+  lastDeviceVariation = s.variation;
+
   if (s.running && s.beatInBar !== lastBeatIndex) {
     lastBeatIndex = s.beatInBar;
     const active = els.beats[s.beatInBar];
@@ -662,6 +707,15 @@ const finishSlider = () => {
 els.tempoSlider.addEventListener("change", finishSlider);
 els.tempoSlider.addEventListener("pointerup", finishSlider);
 
+for (const button of els.tempoPresets) {
+  button.addEventListener("click", () => {
+    const s = link.getState();
+    const bpm = Number(button.dataset.bpm);
+    if (!s.connected || s.sync === "disconnected" || !Number.isFinite(bpm)) return;
+    link.sendBpm(bpm);
+  });
+}
+
 els.swingSlider.addEventListener("pointerdown", () => {
   swingDragging = true;
 });
@@ -703,8 +757,20 @@ els.volumeSlider.addEventListener("change", finishVolume);
 els.volumeSlider.addEventListener("pointerup", finishVolume);
 
 els.btnConnect.addEventListener("click", () => {
-  const action = link.getState().connected ? link.disconnect() : link.requestPort();
+  const action = link.getState().connected ? link.disconnect() : link.requestBluetoothDevice();
   action
+    .then(() => {
+      els.err.hidden = true;
+    })
+    .catch((e: Error) => {
+      if (e.name === "NotFoundError") return;
+      els.err.hidden = false;
+      els.err.textContent = describeBluetoothConnectionError(e);
+    });
+});
+
+els.btnUsbConnect.addEventListener("click", () => {
+  link.requestPort()
     .then(() => {
       els.err.hidden = true;
     })

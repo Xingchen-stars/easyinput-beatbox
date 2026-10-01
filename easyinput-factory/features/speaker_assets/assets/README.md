@@ -1,0 +1,38 @@
+# WaytoAGI factory boot sound
+
+`waytoagi.eiad` is the one product fallback sound embedded in the firmware
+application image. It is not an App preset library and is never copied into
+the `sound_a` / `sound_b` user banks.
+
+The sound is project-owned material of the WaytoAGI community project and is
+distributed under the repository's PolyForm Noncommercial license. Copyright
+and attribution notices are defined in the root `LICENSE`.
+
+Frozen provenance:
+
+- source preset: EasyInput App `speaker-presets/waytoagi.mp3`
+- source MP3 SHA-256:
+  `88dc68a670bb2c8d696d4c6cfdf9e0f1e4b7bf5a57ec338b86c3cf957e732085`
+- conversion: App `import_boot_sound_bytes` followed by
+  `encode_device_sound`
+- decoder/resampler versions: Symphonia 0.5.5 and Rubato 0.15.0
+- format: EIAD v1, 48 kHz mono, 480 samples per frame
+- decoded length: 82,755 samples (173 frames)
+- encoded size: 42,435 bytes
+- encoded SHA-256:
+  `f29312efa6cb78eb1ac43ca762acbbfefa81769f00dee0930f81fd53bc311751`
+- firmware-decoded PCM16LE SHA-256:
+  `431c9f6bebb6eaa44e386252c49a2af9fc647da7a79a5796bbab2e1ea48fbd3f`
+
+The binary is frozen rather than regenerated during ESP-IDF builds so host
+floating-point decoder/resampler differences cannot silently change the
+firmware sound.
+
+## Device mode prompts
+
+`mode_beatbox.eiad` and `mode_easyinput.eiad` are immutable EIAD v1 prompts
+for the five-second top-level mode selector. They were synthesized with the
+same Chinese Windows SAPI voice used by the Beatbox firmware, normalized as
+32 kHz mono PCM16LE, linearly resampled to 48 kHz, and encoded by
+`scripts/encode_eiad.py` in the parent assignment workspace. They are not
+written to the user-controlled `sound_a` / `sound_b` banks.

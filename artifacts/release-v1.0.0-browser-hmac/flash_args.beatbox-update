@@ -1,0 +1,4 @@
+--flash_mode dio
+--flash_freq 80m
+--flash_size 16MB
+0x430000 easyinput_beatbox_v1.0.0_browser_hmac.bin

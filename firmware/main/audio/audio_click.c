@@ -30,6 +30,7 @@ static const char *TAG = "audio_engine";
 #define AUDIO_VOICE_COUNT       12
 #define AUDIO_REQUEST_QUEUE_LEN 48
 #define AUDIO_BEAT_QUEUE_LEN    32
+#define AUDIO_RENDER_TASK_CORE  1
 
 extern const uint8_t s_kick_start[] asm("_binary_kick_raw_start");
 extern const uint8_t s_kick_end[] asm("_binary_kick_raw_end");
@@ -43,6 +44,16 @@ extern const uint8_t s_clap_start[] asm("_binary_clap_raw_start");
 extern const uint8_t s_clap_end[] asm("_binary_clap_raw_end");
 extern const uint8_t s_rim_start[] asm("_binary_rim_raw_start");
 extern const uint8_t s_rim_end[] asm("_binary_rim_raw_end");
+extern const uint8_t s_tempo_slow_start[] asm("_binary_tempo_slow_raw_start");
+extern const uint8_t s_tempo_slow_end[] asm("_binary_tempo_slow_raw_end");
+extern const uint8_t s_tempo_original_start[] asm("_binary_tempo_original_raw_start");
+extern const uint8_t s_tempo_original_end[] asm("_binary_tempo_original_raw_end");
+extern const uint8_t s_tempo_fast_start[] asm("_binary_tempo_fast_raw_start");
+extern const uint8_t s_tempo_fast_end[] asm("_binary_tempo_fast_raw_end");
+extern const uint8_t s_mode_beatbox_start[] asm("_binary_mode_beatbox_raw_start");
+extern const uint8_t s_mode_beatbox_end[] asm("_binary_mode_beatbox_raw_end");
+extern const uint8_t s_mode_easyinput_start[] asm("_binary_mode_easyinput_raw_start");
+extern const uint8_t s_mode_easyinput_end[] asm("_binary_mode_easyinput_raw_end");
 
 typedef enum {
     VOICE_CLICK_NORMAL = 0,
@@ -53,6 +64,11 @@ typedef enum {
     VOICE_OHH,
     VOICE_CLAP,
     VOICE_RIM,
+    VOICE_TEMPO_SLOW,
+    VOICE_TEMPO_ORIGINAL,
+    VOICE_TEMPO_FAST,
+    VOICE_MODE_BEATBOX,
+    VOICE_MODE_EASYINPUT,
 } voice_kind_t;
 
 typedef struct {
@@ -63,8 +79,8 @@ typedef struct {
 typedef struct {
     bool active;
     voice_kind_t kind;
-    uint16_t position;
-    uint16_t length;
+    uint32_t position;
+    uint32_t length;
     uint8_t velocity;
     uint32_t age;
 } audio_voice_t;
@@ -174,7 +190,7 @@ static void publish_position(uint32_t bar, uint16_t tick)
     portEXIT_CRITICAL(&s_position_lock);
 }
 
-static void voice_source(voice_kind_t kind, const int16_t **source, uint16_t *length)
+static void voice_source(voice_kind_t kind, const int16_t **source, uint32_t *length)
 {
     switch (kind) {
     case VOICE_CLICK_ACCENT:
@@ -203,7 +219,30 @@ static void voice_source(voice_kind_t kind, const int16_t **source, uint16_t *le
         break;
     case VOICE_RIM:
         *source = (const int16_t *)s_rim_start;
-        *length = (uint16_t)((s_rim_end - s_rim_start) / sizeof(int16_t));
+        *length = (uint32_t)((s_rim_end - s_rim_start) / sizeof(int16_t));
+        break;
+    case VOICE_TEMPO_SLOW:
+        *source = (const int16_t *)s_tempo_slow_start;
+        *length = (uint32_t)((s_tempo_slow_end - s_tempo_slow_start) / sizeof(int16_t));
+        break;
+    case VOICE_TEMPO_ORIGINAL:
+        *source = (const int16_t *)s_tempo_original_start;
+        *length =
+            (uint32_t)((s_tempo_original_end - s_tempo_original_start) / sizeof(int16_t));
+        break;
+    case VOICE_TEMPO_FAST:
+        *source = (const int16_t *)s_tempo_fast_start;
+        *length = (uint32_t)((s_tempo_fast_end - s_tempo_fast_start) / sizeof(int16_t));
+        break;
+    case VOICE_MODE_BEATBOX:
+        *source = (const int16_t *)s_mode_beatbox_start;
+        *length =
+            (uint32_t)((s_mode_beatbox_end - s_mode_beatbox_start) / sizeof(int16_t));
+        break;
+    case VOICE_MODE_EASYINPUT:
+        *source = (const int16_t *)s_mode_easyinput_start;
+        *length =
+            (uint32_t)((s_mode_easyinput_end - s_mode_easyinput_start) / sizeof(int16_t));
         break;
     case VOICE_CLICK_NORMAL:
     default:
@@ -211,6 +250,13 @@ static void voice_source(voice_kind_t kind, const int16_t **source, uint16_t *le
         *length = CLICK_FRAMES;
         break;
     }
+}
+
+static bool is_voice_prompt(voice_kind_t kind)
+{
+    return kind == VOICE_TEMPO_SLOW || kind == VOICE_TEMPO_ORIGINAL ||
+           kind == VOICE_TEMPO_FAST || kind == VOICE_MODE_BEATBOX ||
+           kind == VOICE_MODE_EASYINPUT;
 }
 
 static voice_kind_t note_to_voice(uint8_t note)
@@ -278,6 +324,10 @@ static int voice_level_q7(voice_kind_t kind)
         return 100;
     case VOICE_KICK:
         return 120;
+    case VOICE_TEMPO_SLOW:
+    case VOICE_TEMPO_ORIGINAL:
+    case VOICE_TEMPO_FAST:
+        return 100;
     default:
         return 100;
     }
@@ -287,7 +337,7 @@ static void start_voice(audio_voice_t voices[AUDIO_VOICE_COUNT], voice_kind_t ki
                         uint8_t velocity, uint32_t age)
 {
     const int16_t *source = NULL;
-    uint16_t length = 0;
+    uint32_t length = 0;
     voice_source(kind, &source, &length);
     (void)source;
 
@@ -303,7 +353,8 @@ static void start_voice(audio_voice_t voices[AUDIO_VOICE_COUNT], voice_kind_t ki
         const bool hats =
             (kind == VOICE_CHH || kind == VOICE_OHH) &&
             (voices[i].kind == VOICE_CHH || voices[i].kind == VOICE_OHH);
-        if (same_kind || hats) {
+        const bool voice_prompt = is_voice_prompt(kind) && is_voice_prompt(voices[i].kind);
+        if (same_kind || hats || voice_prompt) {
             voices[i].active = false;
         }
     }
@@ -463,17 +514,27 @@ static void audio_task(void *argument)
             }
 
             int32_t mixed = 0;
+            bool voice_prompt_active = false;
+            for (int voice_index = 0; voice_index < AUDIO_VOICE_COUNT; ++voice_index) {
+                if (voices[voice_index].active && is_voice_prompt(voices[voice_index].kind)) {
+                    voice_prompt_active = true;
+                    break;
+                }
+            }
             for (int voice_index = 0; voice_index < AUDIO_VOICE_COUNT; ++voice_index) {
                 audio_voice_t *voice = &voices[voice_index];
                 if (!voice->active) {
                     continue;
                 }
                 const int16_t *source = NULL;
-                uint16_t length = 0;
+                uint32_t length = 0;
                 voice_source(voice->kind, &source, &length);
                 int32_t sample = source[voice->position++];
                 sample = (sample * (int32_t)voice->velocity) / 127;
                 sample = (sample * voice_level_q7(voice->kind)) / 100;
+                if (voice_prompt_active && !is_voice_prompt(voice->kind)) {
+                    sample = (sample * 35) / 100;
+                }
                 mixed += sample;
                 if (voice->position >= voice->length) {
                     voice->active = false;
@@ -543,7 +604,8 @@ esp_err_t audio_click_init(void)
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx), TAG, "enable I2S");
 
     const BaseType_t created =
-        xTaskCreatePinnedToCore(audio_task, "audio_render", 6144, NULL, 8, NULL, 0);
+        xTaskCreatePinnedToCore(audio_task, "audio_render", 6144, NULL, 8, NULL,
+                                AUDIO_RENDER_TASK_CORE);
     ESP_RETURN_ON_FALSE(created == pdPASS, ESP_ERR_NO_MEM, TAG, "audio render task");
     s_ready = true;
 
@@ -631,6 +693,32 @@ esp_err_t audio_click_play_accent(void)
 esp_err_t audio_click_play_note(uint8_t note, uint8_t velocity)
 {
     return queue_voice(note_to_voice(note), velocity);
+}
+
+esp_err_t audio_click_play_tempo_prompt(audio_tempo_prompt_t prompt)
+{
+    switch (prompt) {
+    case AUDIO_TEMPO_PROMPT_SLOW:
+        return queue_voice(VOICE_TEMPO_SLOW, 127);
+    case AUDIO_TEMPO_PROMPT_ORIGINAL:
+        return queue_voice(VOICE_TEMPO_ORIGINAL, 127);
+    case AUDIO_TEMPO_PROMPT_FAST:
+        return queue_voice(VOICE_TEMPO_FAST, 127);
+    default:
+        return ESP_ERR_INVALID_ARG;
+    }
+}
+
+esp_err_t audio_click_play_device_mode_prompt(audio_device_mode_prompt_t prompt)
+{
+    switch (prompt) {
+    case AUDIO_DEVICE_MODE_PROMPT_BEATBOX:
+        return queue_voice(VOICE_MODE_BEATBOX, 127);
+    case AUDIO_DEVICE_MODE_PROMPT_EASYINPUT:
+        return queue_voice(VOICE_MODE_EASYINPUT, 127);
+    default:
+        return ESP_ERR_INVALID_ARG;
+    }
 }
 
 void audio_click_get_position(uint32_t *bar, uint8_t *step, uint8_t *beat, uint16_t *tick)
