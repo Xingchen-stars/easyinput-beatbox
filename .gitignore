@@ -5,6 +5,7 @@ sdkconfig.old
 dependencies.lock
 !firmware/dependencies.lock
 !easyinput-factory/dependencies.lock
+!artifacts/release-v1.0.0-browser-hmac/dependencies.lock
 managed_components/
 .cache/
 
@@ -40,6 +41,7 @@ out/
 *.bundle
 artifacts/**/*.zip
 artifacts/**/RELEASE-ASSETS.sha256
+artifacts/**/BACKUP*-ASSETS.sha256
 
 # Preserve the exact verified Beatbox application alongside its source tag.
 !artifacts/release-v1.0.0-browser-hmac/easyinput_beatbox_v1.0.0_browser_hmac.bin

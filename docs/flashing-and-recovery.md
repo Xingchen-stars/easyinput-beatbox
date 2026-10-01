@@ -4,7 +4,7 @@
 
 ## 1. 选择正确的包
 
-从 GitHub Release 下载 `easyinput-beatbox-firmware-v1.0.0-browser-hmac.zip`，或使用固定标签里的 `artifacts/release-v1.0.0-browser-hmac/`。本版镜像：
+从 GitHub Release 下载 `easyinput-beatbox-firmware-v1.0.0-browser-hmac.zip`，或使用恢复修正标签 `v1.0.0-backup.1` 里的 `artifacts/release-v1.0.0-browser-hmac/`。本版镜像：
 
 ```text
 easyinput_beatbox_v1.0.0_browser_hmac.bin

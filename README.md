@@ -10,6 +10,10 @@
 
 发布资产包含已验证的 Beatbox 固件、网页静态包、源码 ZIP 和 Git 历史备份；固件同时保存在 Git 标签下的 [固定更新包](artifacts/release-v1.0.0-browser-hmac/README.md)。这次按可恢复备份版本发布，完整按键回归、自动重连和长时间运行仍保留验收清单，不把它们写成已经全部验证。
 
+在线网页：[Beatbox 网页版](https://xingchen-stars.github.io/easyinput-beatbox/)。首次在这个新网站连接，要按 S7 重新登记；本地网站的浏览器钥匙不会自动转移过去。
+
+恢复源码请优先使用 **`v1.0.0-backup.1`** 标签或 Release 中带 `backup1` 的源码 ZIP / Git bundle。第一次离线恢复检查发现 `v1.0.0` 的 Git 源码备份漏掉了一份被忽略的发布依赖锁，因此增加此恢复资料修正标签；原 `v1.0.0` 和旧附件保留不覆盖，固件与网页程序没有修改。已发布的固件 ZIP 从一开始就包含这份锁文件。详见 [备份修正说明](docs/releases/v1.0.0-backup1.md)。
+
 ![EasyInput Beatbox 网页控制界面](docs/course/figures/png/07-beatbox-web-app.png)
 
 ## 项目是什么
