@@ -129,6 +129,8 @@ pnpm dev
 
 USB 串口同一时间只能由一个程序打开。使用“USB 备用”前，停止 Python/ESP-IDF 串口监听，并断开其他浏览器标签中的 USB 连接。USB 仅作为供电线插着时仍可使用蓝牙；不要为了供电而在网页打开 USB。换到 GitHub Pages、换浏览器或清除网站存储时属于新的浏览器身份，需要重新按 S7 登记。
 
+在线网页的后续修正通过新提交保存，不覆盖固定的 1.0.0 固件和下载包。蓝牙操作队列、`GATT operation already in progress` 排查及双端日志使用方法，见 [蓝牙连接与白盒诊断](docs/ble-connection.md)。
+
 运行网页测试：
 
 ```bash

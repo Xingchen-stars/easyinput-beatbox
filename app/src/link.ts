@@ -1,4 +1,5 @@
 import { BleFrameDecoder, encodeBleLine } from "./ble-framing";
+import { BleOperationQueue } from "./ble-operation-queue";
 import {
   applyLocalBpmDraft,
   applyLocalPattern,
@@ -118,20 +119,28 @@ function browserErrorDetails(cause: unknown): { name: string; message: string } 
 }
 
 function emitBluetoothDiagnostic(level: "info" | "error", message: string) {
+  const entry = { at: new Date().toISOString(), level, message };
+  bluetoothDiagnostics.push(entry);
+  if (bluetoothDiagnostics.length > 256) bluetoothDiagnostics.shift();
   const rendered = `[Beatbox BLE] ${message}`;
   if (level === "error") console.error(rendered);
   else console.info(rendered);
 
   try {
-    if (
-      typeof window === "undefined" ||
-      new URLSearchParams(window.location.search).get("ble-diag") !== "1"
-    ) return;
+    if (typeof window === "undefined") return;
+    // Safe, bounded, in-memory evidence is also available on GitHub Pages.
+    // No browser IDs, keys, challenge values or complete command payloads are logged.
+    Object.defineProperty(window, "__beatboxBleDiagnostics", {
+      configurable: true,
+      get: readBluetoothDiagnostics,
+    });
+    if (new URLSearchParams(window.location.search).get("ble-diag") !== "1") return;
+    if (!["127.0.0.1", "localhost", "[::1]"].includes(window.location.hostname)) return;
     void fetch("/__beatbox_ble_log", {
       method: "POST",
       cache: "no-store",
       body: JSON.stringify({
-        at: new Date().toISOString(),
+        at: entry.at,
         level,
         message,
         page: window.location.href,
@@ -142,6 +151,19 @@ function emitBluetoothDiagnostic(level: "info" | "error", message: string) {
   } catch {
     /* Diagnostics are deliberately best-effort and never change connection behavior. */
   }
+}
+
+type BluetoothDiagnostic = { at: string; level: "info" | "error"; message: string };
+const bluetoothDiagnostics: BluetoothDiagnostic[] = [];
+export function readBluetoothDiagnostics(): BluetoothDiagnostic[] {
+  return bluetoothDiagnostics.map((entry) => ({ ...entry }));
+}
+
+function parseCommandType(line: string): string {
+  try {
+    const { t } = JSON.parse(line) as { t?: unknown };
+    return typeof t === "string" && /^[a-z_]{1,32}$/.test(t) ? t : "unknown";
+  } catch { return "unknown"; }
 }
 
 export class BluetoothConnectionError extends Error {
@@ -177,6 +199,7 @@ export class BeatboxLink {
   private bleRx: BluetoothRemoteGATTCharacteristic | null = null;
   private bleTx: BluetoothRemoteGATTCharacteristic | null = null;
   private bleDecoder = new BleFrameDecoder();
+  private bleOperations: BleOperationQueue | null = null;
   private bleAuthorized = false;
   private bleAuthorizationFailure: Error | null = null;
   private bleAuthorizationBusy = false;
@@ -197,7 +220,8 @@ export class BeatboxLink {
   private userDisconnected = false;
   /** BLE is the daily link. USB reconnect is enabled only after an explicit USB click. */
   private preferredTransport: "ble" | "serial" = "ble";
-  private closing = false;
+  private closingPromise: Promise<void> | null = null;
+  private reconnectPromise: Promise<void> | null = null;
   private openingPromise: Promise<void> | null = null;
   private requestPromise: Promise<void> | null = null;
   private signalRecoveryPromise: Promise<void> | null = null;
@@ -311,12 +335,23 @@ export class BeatboxLink {
   }
 
   private async tryExistingConnections() {
+    if (this.reconnectPromise) return this.reconnectPromise;
+    const reconnecting = this.tryExistingConnectionsOnce();
+    this.reconnectPromise = reconnecting;
+    try { await reconnecting; }
+    finally {
+      if (this.reconnectPromise === reconnecting) this.reconnectPromise = null;
+    }
+  }
+
+  private async tryExistingConnectionsOnce() {
     if (
       this.userDisconnected ||
       this.state.connected ||
       this.readLoopActive ||
       this.openingPromise != null ||
-      this.requestPromise != null
+      this.requestPromise != null ||
+      this.closingPromise != null
     ) return;
 
     if (
@@ -326,6 +361,7 @@ export class BeatboxLink {
     ) {
       try {
         const devices = await navigator.bluetooth.getDevices();
+        if (this.userDisconnected || this.requestPromise != null) return;
         emitBluetoothDiagnostic("info", `auto-reconnect:authorized-devices=${devices.length}`);
         for (const device of devices) {
           if (!device.name?.startsWith("EasyInput Beatbox")) continue;
@@ -354,6 +390,7 @@ export class BeatboxLink {
 
     if (this.preferredTransport === "serial" && "serial" in navigator) {
       const ports = await navigator.serial.getPorts();
+      if (this.userDisconnected || this.requestPromise != null) return;
       for (const port of ports) {
         const info = port.getInfo();
         if (info.usbVendorId != null && info.usbVendorId !== ESPRESSIF_VID) continue;
@@ -417,15 +454,18 @@ export class BeatboxLink {
       );
     }
     this.bleDevice = device;
+    const operations = new BleOperationQueue((message) => emitBluetoothDiagnostic("info", message));
+    this.bleOperations = operations;
     device.addEventListener("gattserverdisconnected", this.handleBleDisconnected);
     try {
-      this.bleServer = await this.runBluetoothStage("gatt-connect", () => device.gatt!.connect());
+      this.bleServer = await this.runBluetoothStage("gatt-connect", () =>
+        operations.run("connect", () => device.gatt!.connect()));
       const service = await this.runBluetoothStage("service-discovery", () =>
-        this.bleServer!.getPrimaryService(BEATBOX_BLE_SERVICE));
+        operations.run("service-discovery", () => this.bleServer!.getPrimaryService(BEATBOX_BLE_SERVICE)));
       this.bleRx = await this.runBluetoothStage("rx-characteristic", () =>
-        service.getCharacteristic(BEATBOX_BLE_RX));
+        operations.run("rx-characteristic", () => service.getCharacteristic(BEATBOX_BLE_RX)));
       this.bleTx = await this.runBluetoothStage("tx-characteristic", () =>
-        service.getCharacteristic(BEATBOX_BLE_TX));
+        operations.run("tx-characteristic", () => service.getCharacteristic(BEATBOX_BLE_TX)));
       this.bleDecoder.reset();
       this.bleAuthorized = false;
       this.bleAuthorizationFailure = null;
@@ -435,7 +475,7 @@ export class BeatboxLink {
       this.bleProtocolSignalSeen = false;
       this.bleTx.addEventListener("characteristicvaluechanged", this.handleBleNotification);
       await this.runBluetoothStage("notification-subscribe", () =>
-        this.bleTx!.startNotifications());
+        operations.run("notification-subscribe", () => this.bleTx!.startNotifications()));
       this.transport = "ble";
       this.patch((s) => markConnecting(s, "ble"));
       await this.runBluetoothStage("device-authorization", () =>
@@ -455,21 +495,31 @@ export class BeatboxLink {
 
   private handleBleNotification = (event: Event) => {
     const characteristic = event.target as unknown as BluetoothRemoteGATTCharacteristic;
+    if (characteristic !== this.bleTx || !this.bleOperations?.isActive) return;
     if (!characteristic.value) return;
     const line = this.bleDecoder.push(characteristic.value);
     if (!line) return;
     const trimmed = line.trim();
     if (trimmed.includes('"t":"ble_auth_')) {
+      const operations = this.bleOperations;
       void this.handleBleAuthorizationLine(trimmed).catch((cause) => {
-        this.bleAuthorizationFailure = cause instanceof Error ? cause : new Error(String(cause));
+        if (this.bleOperations === operations && operations.isActive) {
+          this.bleAuthorizationFailure = cause instanceof Error ? cause : new Error(String(cause));
+        }
       });
       return;
     }
-    this.bleProtocolSignalSeen = true;
+    const message = parseHostLine(trimmed);
+    // A diagnostic notification is not proof that the actual protocol is ready.
+    if (!this.bleAuthorized) return;
+    if (message?.t === "hello" || message?.t === "state") this.bleProtocolSignalSeen = true;
     this.onLine(trimmed);
   };
 
   private async handleBleAuthorizationLine(line: string) {
+    const operations = this.bleOperations;
+    const isCurrent = () => operations != null && operations.isActive && this.bleOperations === operations;
+    if (!isCurrent()) return;
     let message: {
       t?: string;
       nonce?: string;
@@ -496,6 +546,7 @@ export class BeatboxLink {
         const credential = loadCredential(deviceId);
         if (credential) {
           const proof = await hmacProof(credential.key, message.nonce);
+          if (!isCurrent()) return;
           emitBluetoothDiagnostic("info", "app-auth:challenge-response");
           await this.writeBleLineRaw(JSON.stringify({
             t: "ble_auth",
@@ -516,7 +567,7 @@ export class BeatboxLink {
           key: enrollment.key,
         }), true);
       } finally {
-        this.bleAuthorizationBusy = false;
+        if (isCurrent()) this.bleAuthorizationBusy = false;
       }
       return;
     }
@@ -531,11 +582,16 @@ export class BeatboxLink {
         const enrollment = loadCredential(deviceId) ?? makeCredential();
         this.pendingEnrollment = enrollment;
         emitBluetoothDiagnostic("info", `app-auth:repairing-${message.code}`);
-        await this.writeBleLineRaw(JSON.stringify({
-          t: "ble_enroll",
-          id: enrollment.id,
-          key: enrollment.key,
-        }), true);
+        this.bleAuthorizationBusy = true;
+        try {
+          await this.writeBleLineRaw(JSON.stringify({
+            t: "ble_enroll",
+            id: enrollment.id,
+            key: enrollment.key,
+          }), true);
+        } finally {
+          if (isCurrent()) this.bleAuthorizationBusy = false;
+        }
         return;
       }
       throw new Error(
@@ -559,6 +615,9 @@ export class BeatboxLink {
 
   private handleBleDisconnected = () => {
     emitBluetoothDiagnostic("error", "gatt:disconnected");
+    this.bleOperations?.invalidate();
+    this.bleOperations = null;
+    this.bleTx?.removeEventListener("characteristicvaluechanged", this.handleBleNotification);
     this.transport = null;
     this.bleRx = null;
     this.bleTx = null;
@@ -650,46 +709,51 @@ export class BeatboxLink {
   }
 
   private async closeConnection() {
-    if (this.closing) return;
-    this.closing = true;
-    try {
-      if (this.staleTimer != null) {
-        window.clearInterval(this.staleTimer);
-        this.staleTimer = null;
-      }
-      this.readLoopActive = false;
-      const reader = this.reader;
-      const writer = this.writer;
-      const port = this.port;
-      const device = this.bleDevice;
-      const tx = this.bleTx;
-      this.reader = null;
-      this.writer = null;
-      this.port = null;
-      this.bleDevice = null;
-      this.bleServer = null;
-      this.bleRx = null;
-      this.bleTx = null;
-      this.transport = null;
-      this.bleAuthorized = false;
-      this.bleAuthorizationFailure = null;
-      this.bleAuthorizationBusy = false;
-      this.blePairingOpen = false;
-      this.pendingEnrollment = null;
-      this.bleProtocolSignalSeen = false;
-      this.bleDecoder.reset();
-      try { await reader?.cancel(); } catch { /* ignore */ }
-      try { reader?.releaseLock(); writer?.releaseLock(); } catch { /* ignore */ }
-      try { await port?.close(); } catch { /* ignore */ }
-      try {
-        tx?.removeEventListener("characteristicvaluechanged", this.handleBleNotification);
-        await tx?.stopNotifications();
-      } catch { /* ignore */ }
-      device?.removeEventListener("gattserverdisconnected", this.handleBleDisconnected);
-      try { device?.gatt?.disconnect(); } catch { /* ignore */ }
-    } finally {
-      this.closing = false;
+    if (this.closingPromise) return this.closingPromise;
+    const closing = this.closeConnectionOnce();
+    this.closingPromise = closing;
+    try { await closing; }
+    finally {
+      if (this.closingPromise === closing) this.closingPromise = null;
     }
+  }
+
+  private async closeConnectionOnce() {
+    if (this.staleTimer != null) {
+      window.clearInterval(this.staleTimer);
+      this.staleTimer = null;
+    }
+    this.readLoopActive = false;
+    const reader = this.reader;
+    const writer = this.writer;
+    const port = this.port;
+    const device = this.bleDevice;
+    const tx = this.bleTx;
+    this.bleOperations?.invalidate();
+    this.bleOperations = null;
+    this.reader = null;
+    this.writer = null;
+    this.port = null;
+    this.bleDevice = null;
+    this.bleServer = null;
+    this.bleRx = null;
+    this.bleTx = null;
+    this.transport = null;
+    this.bleAuthorized = false;
+    this.bleAuthorizationFailure = null;
+    this.bleAuthorizationBusy = false;
+    this.blePairingOpen = false;
+    this.pendingEnrollment = null;
+    this.bleProtocolSignalSeen = false;
+    this.bleDecoder.reset();
+    try { await reader?.cancel(); } catch { /* ignore */ }
+    try { reader?.releaseLock(); writer?.releaseLock(); } catch { /* ignore */ }
+    try { await port?.close(); } catch { /* ignore */ }
+    // Disconnect terminates notifications. Calling stopNotifications here could
+    // itself overlap an in-flight write and needlessly delay releasing the link.
+    tx?.removeEventListener("characteristicvaluechanged", this.handleBleNotification);
+    device?.removeEventListener("gattserverdisconnected", this.handleBleDisconnected);
+    try { device?.gatt?.disconnect(); } catch { /* ignore */ }
   }
 
   /** Kept for focused serial tests and the wired recovery path. */
@@ -726,8 +790,7 @@ export class BeatboxLink {
     // Observe received data and the state used by the view, without logging credentials
     // or producing a request for every sequencer tick.
     if (
-      this.transport !== "ble" || typeof window === "undefined" ||
-      new URLSearchParams(window.location.search).get("ble-diag") !== "1"
+      this.transport !== "ble" || typeof window === "undefined"
     ) return;
     const message = parseHostLine(line);
     if (!message) return;
@@ -762,20 +825,29 @@ export class BeatboxLink {
   }
 
   private async writeBleLineRaw(line: string, withResponse = false) {
-    if (!this.bleRx) throw new Error("蓝牙写入特征尚未准备好。");
-    for (const packet of encodeBleLine(line)) {
-      if (withResponse) {
-        await this.bleRx.writeValueWithResponse(packet.buffer as ArrayBuffer);
-      } else {
-        await this.bleRx.writeValueWithoutResponse(packet.buffer as ArrayBuffer);
+    const rx = this.bleRx;
+    const operations = this.bleOperations;
+    if (!rx || !operations) throw new Error("蓝牙写入特征尚未准备好。");
+    const command = parseCommandType(line);
+    // Queue the entire JSON message so packets from two commands cannot interleave.
+    await operations.run(`write:${command}:${withResponse ? "ack" : "no-ack"}`, async () => {
+      for (const packet of encodeBleLine(line)) {
+        if (this.bleOperations !== operations || !operations.isActive || this.bleRx !== rx) {
+          throw Object.assign(new Error("Bluetooth connection changed during write."), { name: "AbortError" });
+        }
+        if (withResponse) {
+          await rx.writeValueWithResponse(packet.buffer as ArrayBuffer);
+        } else {
+          await rx.writeValueWithoutResponse(packet.buffer as ArrayBuffer);
+        }
       }
-    }
+    });
   }
 
   private async waitForBleAuthorization() {
     emitBluetoothDiagnostic("info", "app-auth:waiting-for-challenge");
     const deadline = Date.now() + BLE_AUTH_TIMEOUT_MS;
-    while (!this.bleAuthorized) {
+    while (!this.bleAuthorized || this.bleAuthorizationBusy) {
       if (this.bleAuthorizationFailure) throw this.bleAuthorizationFailure;
       if (!this.bleServer?.connected) {
         throw Object.assign(new Error("GATT disconnected during device authorization."), {
@@ -789,6 +861,7 @@ export class BeatboxLink {
       }
       await new Promise<void>((resolve) => window.setTimeout(resolve, BLE_READY_POLL_MS));
     }
+    if (this.bleAuthorizationFailure) throw this.bleAuthorizationFailure;
     emitBluetoothDiagnostic("info", "app-auth:ready");
   }
 
@@ -813,12 +886,15 @@ export class BeatboxLink {
 
   private async writeLineOrThrow(line: string) {
     if (this.transport === "ble" && this.bleRx) {
+      const operations = this.bleOperations;
       try {
         await this.writeBleLineRaw(line);
         return;
       } catch (cause) {
-        this.patch((s) => markDisconnected(s, "蓝牙写入失败，正在重连…"));
-        void this.closeConnection();
+        if (this.bleOperations === operations) {
+          this.patch((s) => markDisconnected(s, "蓝牙写入失败，正在重连…"));
+          void this.closeConnection();
+        }
         throw new Error("向设备发送蓝牙命令失败，请重新连接后再试。", { cause });
       }
     }
