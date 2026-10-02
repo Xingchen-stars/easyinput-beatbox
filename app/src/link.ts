@@ -122,7 +122,7 @@ function emitBluetoothDiagnostic(level: "info" | "error", message: string) {
   const entry = { at: new Date().toISOString(), level, message };
   bluetoothDiagnostics.push(entry);
   if (bluetoothDiagnostics.length > 256) bluetoothDiagnostics.shift();
-  const rendered = `[Beatbox BLE] ${message}`;
+  const rendered = `[Beatbox ${message.startsWith("serial:") ? "USB" : "BLE"}] ${message}`;
   if (level === "error") console.error(rendered);
   else console.info(rendered);
 
@@ -213,6 +213,10 @@ export class BeatboxLink {
   private writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
   private readLoopActive = false;
   private rxText = "";
+  private serialRxBytes = 0;
+  private serialRxChunks = 0;
+  private serialRxLines = 0;
+  private serialProbeDiagnosticAt = 0;
   private encoder = new TextEncoder();
   private decoder = new TextDecoder();
 
@@ -653,10 +657,13 @@ export class BeatboxLink {
     if (this.port === port && this.state.connected) return;
     await this.closeConnection();
     this.port = port;
+    emitBluetoothDiagnostic("info", "serial:open:start");
     try {
       await port.open({ baudRate: 115200 });
       await port.setSignals({ dataTerminalReady: true, requestToSend: false });
     } catch (error) {
+      const details = browserErrorDetails(error);
+      emitBluetoothDiagnostic("error", `serial:open:error ${details.name}: ${details.message}`);
       await this.closeConnection();
       throw error;
     }
@@ -664,7 +671,12 @@ export class BeatboxLink {
     this.reader = port.readable?.getReader() ?? null;
     this.readLoopActive = true;
     this.rxText = "";
+    this.serialRxBytes = 0;
+    this.serialRxChunks = 0;
+    this.serialRxLines = 0;
+    this.serialProbeDiagnosticAt = 0;
     this.transport = "serial";
+    emitBluetoothDiagnostic("info", `serial:open:ready reader=${!!this.reader} writer=${!!this.writer} dtr=true rts=false`);
     this.patch((s) => markConnecting(s, "serial"));
     void this.writeLine('{"t":"ping"}');
     void this.readLoop();
@@ -692,6 +704,10 @@ export class BeatboxLink {
     const recovery = (async () => {
       try {
         if (this.transport === "serial" && this.port) {
+          if (Date.now() - this.serialProbeDiagnosticAt >= 5000) {
+            this.serialProbeDiagnosticAt = Date.now();
+            emitBluetoothDiagnostic("info", `serial:probe rxBytes=${this.serialRxBytes} rxChunks=${this.serialRxChunks} rxLines=${this.serialRxLines} bufferedChars=${this.rxText.length}`);
+          }
           await this.port.setSignals({ dataTerminalReady: true, requestToSend: false });
         }
         await this.writeLineOrThrow('{"t":"ping"}');
@@ -762,20 +778,32 @@ export class BeatboxLink {
   private async readLoop() {
     const reader = this.reader;
     if (!reader) return;
+    emitBluetoothDiagnostic("info", "serial:read:start");
+    let lastChunkDiagnosticAt = 0;
     try {
       while (this.readLoopActive) {
         const { value, done } = await reader.read();
         if (done) break;
         if (!value) continue;
+        this.serialRxBytes += value.byteLength;
+        this.serialRxChunks++;
+        if (this.serialRxChunks <= 3 || Date.now() - lastChunkDiagnosticAt >= 5000) {
+          lastChunkDiagnosticAt = Date.now();
+          emitBluetoothDiagnostic("info", `serial:read:chunk bytes=${value.byteLength} totalBytes=${this.serialRxBytes} chunks=${this.serialRxChunks}`);
+        }
         this.rxText += this.decoder.decode(value, { stream: true });
         let nl: number;
         while ((nl = this.rxText.indexOf("\n")) >= 0) {
           const line = this.rxText.slice(0, nl).trim();
           this.rxText = this.rxText.slice(nl + 1);
+          this.serialRxLines++;
           if (line) this.onLine(line);
         }
       }
-    } catch { /* disconnect */ }
+    } catch (error) {
+      const details = browserErrorDetails(error);
+      emitBluetoothDiagnostic("error", `serial:read:error ${details.name}: ${details.message}`);
+    }
     finally {
       this.readLoopActive = false;
       this.patch((s) =>
@@ -790,10 +818,18 @@ export class BeatboxLink {
     // Observe received data and the state used by the view, without logging credentials
     // or producing a request for every sequencer tick.
     if (
-      this.transport !== "ble" || typeof window === "undefined"
+      !this.transport || typeof window === "undefined"
     ) return;
+    const prefix = this.transport === "serial" ? "serial:protocol" : "protocol";
     const message = parseHostLine(line);
-    if (!message) return;
+    if (!message) {
+      // USB shares its stream with firmware logs. Observe damaged JSON without
+      // exposing the raw stream (which may contain authentication diagnostics).
+      if (this.transport === "serial" && line.includes('{"t":')) {
+        emitBluetoothDiagnostic("info", `${prefix}:ignored-frame length=${line.length} startsWithJson=${line.startsWith("{")}`);
+      }
+      return;
+    }
     const state = this.state;
     if (message.t === "state") {
       const summary = JSON.stringify({
@@ -809,18 +845,20 @@ export class BeatboxLink {
       });
       if (summary !== this.lastProtocolStateDiagnostic) {
         this.lastProtocolStateDiagnostic = summary;
-        emitBluetoothDiagnostic("info", `protocol:state ${summary}`);
+        emitBluetoothDiagnostic("info", `${prefix}:state ${summary}`);
       }
     } else if (message.t === "key") {
-      emitBluetoothDiagnostic("info", `protocol:key ${JSON.stringify({
+      emitBluetoothDiagnostic("info", `${prefix}:key ${JSON.stringify({
         index: message.i, value: message.v,
         keysDown: state.keysDown,
         flashing: state.keyFlashUntil.map((until) => until > Date.now()),
       })}`);
     } else if (message.t === "hello") {
-      emitBluetoothDiagnostic("info", `protocol:hello v=${message.v} name=${message.name} link=${state.link}`);
+      emitBluetoothDiagnostic("info", `${prefix}:hello v=${message.v} name=${message.name} link=${state.link}`);
     } else if (message.t === "pattern") {
-      emitBluetoothDiagnostic("info", `protocol:pattern bank=${message.bank} revision=${message.rev} sync=${state.sync}`);
+      emitBluetoothDiagnostic("info", `${prefix}:pattern bank=${message.bank} revision=${message.rev} sync=${state.sync}`);
+    } else if (message.t === "note" && this.transport === "serial") {
+      emitBluetoothDiagnostic("info", `${prefix}:note n=${message.n} v=${message.v}`);
     }
   }
 
@@ -901,6 +939,7 @@ export class BeatboxLink {
     if (this.transport === "serial" && this.writer) {
       try {
         await this.writer.write(this.encoder.encode(line + "\n"));
+        emitBluetoothDiagnostic("info", `serial:write:ok command=${parseCommandType(line)}`);
         return;
       } catch (cause) {
         this.patch((s) => markDisconnected(s, "USB 写入失败，正在重连…"));

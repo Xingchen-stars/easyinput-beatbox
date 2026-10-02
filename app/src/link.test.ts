@@ -228,6 +228,43 @@ describe("BeatboxLink Windows GATT timing regressions", () => {
 });
 
 describe("BeatboxLink serial opening", () => {
+  it("applies split USB key frames and device-originated S7 A/B states with safe diagnostics", async () => {
+    makeWindowTimerStub();
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const port = {
+      open: vi.fn(async () => undefined),
+      setSignals: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+      readable: new ReadableStream<Uint8Array>({ start(value) { controller = value; } }),
+      writable: new WritableStream<Uint8Array>({ write() {} }),
+    } as unknown as SerialPort;
+    const link = new BeatboxLink();
+    const privateLink = link as unknown as LinkWithPrivateOpen;
+    const enqueue = (text: string) => controller.enqueue(new TextEncoder().encode(text));
+
+    await privateLink.openPort(port);
+    try {
+      enqueue('I (100) host: ready\r\n{"t":"key","i":');
+      enqueue('4,"v":1}\r\n');
+      await vi.waitFor(() => expect(link.getState().keysDown[4]).toBe(true));
+      expect(link.getState().keyFlashUntil[4]).toBeGreaterThan(Date.now());
+      enqueue('{"t":"key","i":4,"v":0}\n{"t":"state","bpm":120,"run":0,"beat":0,"var":1}\n');
+      await vi.waitFor(() => expect(link.getState().variation).toBe(1));
+      expect(link.getState().keysDown[4]).toBe(false);
+      expect(link.getState().link).toBe("serial");
+      expect(link.getState().sync).toBe("synced");
+      enqueue('prefix{"t":"key","i":0,"v":1,"key":"must-not-log-raw-secret"}\n');
+      await vi.waitFor(() => expect(readBluetoothDiagnostics().some((entry) =>
+        entry.message.includes("serial:protocol:ignored-frame"))).toBe(true));
+      const diagnostics = JSON.stringify(readBluetoothDiagnostics());
+      expect(diagnostics).toContain("serial:protocol:key");
+      expect(diagnostics).toContain("serial:protocol:state");
+      expect(diagnostics).not.toContain("must-not-log-raw-secret");
+    } finally {
+      await privateLink.disconnect();
+    }
+  });
+
   it("shares an in-progress Web Serial open between concurrent callers", async () => {
     let markStarted!: () => void;
     let rejectOpen!: (reason: Error) => void;

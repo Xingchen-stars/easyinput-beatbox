@@ -14,6 +14,8 @@
 
 恢复源码请优先使用 **`v1.0.0-backup.1`** 标签或 Release 中带 `backup1` 的源码 ZIP / Git bundle。第一次离线恢复检查发现 `v1.0.0` 的 Git 源码备份漏掉了一份被忽略的发布依赖锁，因此增加此恢复资料修正标签；原 `v1.0.0` 和旧附件保留不覆盖，固件与网页程序没有修改。已发布的固件 ZIP 从一开始就包含这份锁文件。详见 [备份修正说明](docs/releases/v1.0.0-backup1.md)。
 
+2026-10-02 追加 **`v1.0.0-usb-whitebox.1`** 同配置网页快照，保存当前 USB 白盒诊断和 S1/S5 高亮、S7 A/B 的真实验收结果。使用这一版网页时，**不需要重新烧录**；固件、BLE 授权方式、USB 参数均不变。需要包含本次网页改动的源码，请使用此新标签或对应 Release 的源码 ZIP / Git bundle；原 1.0 固定备份继续保留。详情见 [USB 白盒快照说明](docs/releases/v1.0.0-usb-whitebox1.md)。
+
 ![EasyInput Beatbox 网页控制界面](docs/course/figures/png/07-beatbox-web-app.png)
 
 ## 项目是什么
